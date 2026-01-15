@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Alpha Date Token & Profiles",
+  "version": "1.0.0",
+  "description": "Получает JWT токен и делает запрос к API profiles на alpha.date",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel",
+    "alarms",
+    "notifications",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://alpha.date/*",
+    "https://*.railway.app/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["popup.html", "popup.js", "auth.html", "auth.js"],
+      "matches": ["https://alpha.date/*"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://alpha.date/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {},
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "auth.html"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
+
