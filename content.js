@@ -3,7 +3,6 @@
     'use strict';
 
     const API_BASE = 'https://alpha.date';
-    const SERVER_URL = 'https://alpha-production-5ab0.up.railway.app';
 
     // Функция для получения JWT токена из localStorage
     function getToken() {
@@ -14,400 +13,6 @@
             return null;
         }
     }
-    
-    // Функция для получения email оператора из localStorage сайта alpha.date
-    function getOperatorEmail() {
-        try {
-            // Пробуем разные возможные ключи для email оператора
-            const possibleKeys = ['email', 'user_email', 'operator_email', 'userEmail', 'operatorEmail'];
-            
-            for (const key of possibleKeys) {
-                const value = localStorage.getItem(key);
-                if (value && value.includes('@')) {
-                    console.log('[Alpha Date Extension] Email найден по ключу:', key, '=', value);
-                    return value;
-                }
-            }
-            
-            // Пробуем найти email в объекте user или profile
-            const userKeys = ['user', 'profile', 'currentUser', 'current_user', 'operator'];
-            for (const key of userKeys) {
-                const rawValue = localStorage.getItem(key);
-                if (rawValue) {
-                    try {
-                        const parsed = JSON.parse(rawValue);
-                        if (parsed && parsed.email) {
-                            console.log('[Alpha Date Extension] Email найден в объекте:', key, '=', parsed.email);
-                            return parsed.email;
-                        }
-                    } catch (e) {
-                        // Не JSON, пропускаем
-                    }
-                }
-            }
-            
-            // Пробуем найти любой ключ содержащий email в значении
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                const value = localStorage.getItem(key);
-                if (value && typeof value === 'string') {
-                    // Проверяем формат OP*@alpha.date
-                    const emailMatch = value.match(/OP\d+@alpha\.date/i);
-                    if (emailMatch) {
-                        console.log('[Alpha Date Extension] Email найден по паттерну в ключе:', key, '=', emailMatch[0]);
-                        return emailMatch[0];
-                    }
-                    // Или любой email
-                    if (value.includes('@alpha.date') && !value.startsWith('{') && !value.startsWith('[')) {
-                        console.log('[Alpha Date Extension] Email найден:', key, '=', value);
-                        return value;
-                    }
-                }
-            }
-            
-            console.log('[Alpha Date Extension] Email оператора не найден в localStorage');
-            return null;
-        } catch (e) {
-            console.error('[Alpha Date Extension] Ошибка при получении email:', e);
-            return null;
-        }
-    }
-    
-    // ===== СИСТЕМА КЕШИРОВАНИЯ =====
-    // Кеш для авто-ответов (время жизни: 5 минут)
-    const contentCache = new Map();
-    const CONTENT_CACHE_TTL = 5 * 60 * 1000; // 5 минут в миллисекундах
-
-    // Кеш для фото (время жизни: 15 минут)
-    const photoCache = new Map();
-    const PHOTO_CACHE_TTL = 15 * 60 * 1000; // 15 минут в миллисекундах
-
-    // ===== КЕШИРОВАНИЕ DOM ЭЛЕМЕНТОВ =====
-    // Кеш для часто используемых DOM элементов (очищается при навигации)
-    const domCache = new Map();
-    const DOM_CACHE_TTL = 30 * 1000; // 30 секунд для DOM элементов
-
-    // ===== ДЕБАУНСИНГ =====
-    // Дебаунсинг для предотвращения частых вызовов тяжелых функций
-    const debounceTimers = new Map();
-
-    function debounce(func, key, delay = 500) {
-        if (debounceTimers.has(key)) {
-            clearTimeout(debounceTimers.get(key));
-        }
-
-        return new Promise((resolve) => {
-            const timer = setTimeout(async () => {
-                debounceTimers.delete(key);
-                const result = await func();
-                resolve(result);
-            }, delay);
-
-            debounceTimers.set(key, timer);
-        });
-    }
-
-    // Функция получения кешированного DOM элемента
-    function getCachedElement(selector, ttl = DOM_CACHE_TTL) {
-        const cacheKey = `dom_${selector}`;
-        const cached = domCache.get(cacheKey);
-
-        if (cached && (Date.now() - cached.timestamp) < ttl) {
-            return cached.element;
-        }
-
-        const element = document.querySelector(selector);
-        if (element) {
-            domCache.set(cacheKey, {
-                element: element,
-                timestamp: Date.now()
-            });
-        }
-
-        return element;
-    }
-
-    // Функция получения кешированного элемента по ID
-    function getCachedElementById(id, ttl = DOM_CACHE_TTL) {
-        const cacheKey = `dom_id_${id}`;
-        const cached = domCache.get(cacheKey);
-
-        if (cached && (Date.now() - cached.timestamp) < ttl) {
-            return cached.element;
-        }
-
-        const element = document.getElementById(id);
-        if (element) {
-            domCache.set(cacheKey, {
-                element: element,
-                timestamp: Date.now()
-            });
-        }
-
-        return element;
-    }
-
-    // Очистка DOM кеша при навигации
-    let lastUrl = window.location.href;
-    setInterval(() => {
-        if (window.location.href !== lastUrl) {
-            domCache.clear();
-            lastUrl = window.location.href;
-            console.log('[Alpha Date Extension] DOM кеш очищен при навигации');
-        }
-    }, 1000);
-
-    // Функция получения данных из кеша
-    function getFromContentCache(cache, key) {
-        const item = cache.get(key);
-        if (!item) return null;
-
-        const now = Date.now();
-        if (now - item.timestamp > item.ttl) {
-            cache.delete(key);
-            return null;
-        }
-
-        return item.data;
-    }
-
-    // Функция сохранения данных в кеш
-    function setContentCache(cache, key, data, ttl = CONTENT_CACHE_TTL) {
-        cache.set(key, {
-            data: data,
-            timestamp: Date.now(),
-            ttl: ttl
-        });
-
-        // Очищаем старые записи при превышении размера кеша
-        if (cache.size > 50) {
-            const oldestKey = cache.keys().next().value;
-            cache.delete(oldestKey);
-        }
-    }
-
-    // ===== СИНХРОНИЗАЦИЯ АВТО-ОТВЕТОВ С СЕРВЕРОМ =====
-    let lastSyncedEmail = null; // Запоминаем email для которого уже синхронизировали
-    
-    /**
-     * Загружает авто-ответы с сервера и ПОЛНОСТЬЮ ЗАМЕНЯЕТ локальные
-     * Привязка по email оператора (одинаковый для админа и оператора)
-     */
-    async function syncAutoRepliesFromServer(force = false) {
-        // Используем дебаунсинг для предотвращения частых вызовов
-        if (!force) {
-            return debounce(async () => {
-                return await syncAutoRepliesFromServerInternal(force);
-            }, 'syncAutoReplies', 2000); // Минимум 2 секунды между вызовами
-        }
-
-        return await syncAutoRepliesFromServerInternal(force);
-    }
-
-    async function syncAutoRepliesFromServerInternal(force = false) {
-        try {
-            const operatorEmail = getOperatorEmail();
-            if (!operatorEmail) {
-                console.log('[Alpha Date Extension] Email оператора не найден, синхронизация пропущена');
-                return false;
-            }
-
-            // Проверяем кеш авто-ответов
-            const cacheKey = `autoreplies_${operatorEmail}`;
-            const cachedData = getFromContentCache(contentCache, cacheKey);
-
-            if (!force && cachedData && lastSyncedEmail === operatorEmail) {
-                console.log('[Alpha Date Extension] 📋 Используем кешированные авто-ответы для:', operatorEmail);
-
-                // Применяем кешированные данные
-                const localData = await chrome.storage.local.get(['profileBroadcastMessages']);
-                const localMessages = localData.profileBroadcastMessages || {};
-
-                // Список авто-ответ полей
-                const autoReplyFields = [
-                    'winkReply', 'winkPhotoUrl', 'winkPhotoFilename', 'winkPhotoContentId',
-                    'likeReply', 'likePhotoUrl', 'likePhotoFilename', 'likePhotoContentId',
-                    'viewReply', 'viewPhotoUrl', 'viewPhotoFilename', 'viewPhotoContentId'
-                ];
-
-                // Применяем кешированные авто-ответы
-                for (const [profileId, replies] of Object.entries(cachedData.auto_replies)) {
-                    if (!localMessages[profileId]) {
-                        localMessages[profileId] = {};
-                    }
-
-                    for (const field of autoReplyFields) {
-                        if (replies[field]) {
-                            localMessages[profileId][field] = replies[field];
-                        }
-                    }
-                }
-
-                // Сохраняем обновленные данные
-                await chrome.storage.local.set({ profileBroadcastMessages: localMessages });
-                console.log('[Alpha Date Extension] ✅ Кешированные авто-ответы применены, профилей:', Object.keys(cachedData.auto_replies).length);
-
-                return true;
-            }
-
-            console.log('[Alpha Date Extension] 📥 Загрузка авто-ответов с сервера для:', operatorEmail);
-
-            const response = await fetch(`${SERVER_URL}/api/sync-autoreplies`, {
-                method: 'GET',
-                headers: {
-                    'X-Operator-Email': operatorEmail
-                }
-            });
-
-            if (response.ok) {
-                const result = await response.json();
-
-                // Кешируем результат
-                setContentCache(contentCache, cacheKey, result);
-
-                if (result.found && result.auto_replies && Object.keys(result.auto_replies).length > 0) {
-                    console.log('[Alpha Date Extension] ✅ Авто-ответы загружены с сервера, профилей:', result.profiles_count);
-
-                    // Получаем локальные данные
-                    const localData = await chrome.storage.local.get(['profileBroadcastMessages']);
-                    const localMessages = localData.profileBroadcastMessages || {};
-
-                    // Список авто-ответ полей
-                    const autoReplyFields = [
-                        'winkReply', 'winkPhotoUrl', 'winkPhotoFilename', 'winkPhotoContentId',
-                        'likeReply', 'likePhotoUrl', 'likePhotoFilename', 'likePhotoContentId',
-                        'viewReply', 'viewPhotoUrl', 'viewPhotoFilename', 'viewPhotoContentId'
-                    ];
-
-                    // Удаляем авто-ответы из всех локальных профилей
-                    for (const profileId of Object.keys(localMessages)) {
-                        for (const field of autoReplyFields) {
-                            delete localMessages[profileId][field];
-                        }
-                        // Если профиль пустой - удаляем его
-                        if (Object.keys(localMessages[profileId]).length === 0) {
-                            delete localMessages[profileId];
-                        }
-                    }
-                    
-                    // Теперь добавляем серверные авто-ответы
-                    for (const [profileId, serverConfig] of Object.entries(result.auto_replies)) {
-                        if (!localMessages[profileId]) {
-                            localMessages[profileId] = {};
-                        }
-                        Object.assign(localMessages[profileId], serverConfig);
-                    }
-                    
-                    // Сохраняем данные локально
-                    await chrome.storage.local.set({ profileBroadcastMessages: localMessages });
-                    
-                    console.log('[Alpha Date Extension] ✅ Авто-ответы полностью заменены серверными');
-                    lastSyncedEmail = operatorEmail;
-                    return true;
-                } else {
-                    console.log('[Alpha Date Extension] На сервере нет сохраненных авто-ответов для:', operatorEmail);
-                    lastSyncedEmail = operatorEmail;
-                    return false;
-                }
-            } else {
-                console.warn('[Alpha Date Extension] ❌ Ошибка загрузки авто-ответов:', response.status);
-                return false;
-            }
-        } catch (error) {
-            console.warn('[Alpha Date Extension] ❌ Ошибка синхронизации авто-ответов:', error);
-            return false;
-        }
-    }
-    
-    /**
-     * Отправляет текущие авто-ответы на сервер
-     * Привязка по email оператора
-     */
-    async function syncAutoRepliesToServer() {
-        try {
-            const operatorEmail = getOperatorEmail();
-            if (!operatorEmail) {
-                console.log('[Alpha Date Extension] Email оператора не найден, синхронизация на сервер пропущена');
-                return false;
-            }
-            
-            // Получаем актуальные данные из storage
-            const data = await chrome.storage.local.get(['profileBroadcastMessages']);
-            const autoReplies = data.profileBroadcastMessages || {};
-            
-            // Собираем авто-ответы (включая пустые поля для синхронизации удалений)
-            const autoRepliesOnly = {};
-            for (const [profileId, config] of Object.entries(autoReplies)) {
-                const filtered = {};
-                // Всегда включаем все поля - пустые значения тоже важны для синхронизации
-                filtered.winkReply = config.winkReply || '';
-                filtered.winkPhotoUrl = config.winkPhotoUrl || '';
-                filtered.winkPhotoFilename = config.winkPhotoFilename || '';
-                filtered.winkPhotoContentId = config.winkPhotoContentId || '';
-                filtered.likeReply = config.likeReply || '';
-                filtered.likePhotoUrl = config.likePhotoUrl || '';
-                filtered.likePhotoFilename = config.likePhotoFilename || '';
-                filtered.likePhotoContentId = config.likePhotoContentId || '';
-                filtered.viewReply = config.viewReply || '';
-                filtered.viewPhotoUrl = config.viewPhotoUrl || '';
-                filtered.viewPhotoFilename = config.viewPhotoFilename || '';
-                filtered.viewPhotoContentId = config.viewPhotoContentId || '';
-                
-                // Проверяем есть ли хоть что-то непустое (чтобы не создавать пустые профили)
-                const hasAnyValue = Object.values(filtered).some(v => v && v.length > 0);
-                if (hasAnyValue) {
-                    autoRepliesOnly[profileId] = filtered;
-                }
-            }
-            
-            if (Object.keys(autoRepliesOnly).length === 0) {
-                console.log('[Alpha Date Extension] Нет авто-ответов для синхронизации');
-                return false;
-            }
-            
-            console.log('[Alpha Date Extension] 📤 Отправка авто-ответов на сервер для:', operatorEmail, ', профилей:', Object.keys(autoRepliesOnly).length);
-            
-            const response = await fetch(`${SERVER_URL}/api/sync-autoreplies`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    operator_email: operatorEmail,
-                    auto_replies: autoRepliesOnly
-                })
-            });
-            
-            if (response.ok) {
-                const result = await response.json();
-                console.log('[Alpha Date Extension] ✅ Авто-ответы отправлены на сервер:', result);
-                return true;
-            } else {
-                console.error('[Alpha Date Extension] ❌ Ошибка отправки авто-ответов:', response.status);
-                return false;
-            }
-        } catch (error) {
-            console.error('[Alpha Date Extension] ❌ Ошибка отправки авто-ответов:', error);
-            return false;
-        }
-    }
-    
-    // Автоматическая синхронизация при загрузке страницы alpha.date
-    if (window.location.hostname.includes('alpha.date')) {
-        // Ждем пока email появится в localStorage
-        const waitForEmail = setInterval(() => {
-            const email = getOperatorEmail();
-            if (email) {
-                clearInterval(waitForEmail);
-                console.log('[Alpha Date Extension] 📧 Email найден:', email, ', запускаем синхронизацию авто-ответов...');
-                syncAutoRepliesFromServerInternal(true);
-            }
-        }, 1000);
-        
-        // Останавливаем проверку через 30 секунд
-        setTimeout(() => clearInterval(waitForEmail), 30000);
-    }
-    // ===== КОНЕЦ БЛОКА СИНХРОНИЗАЦИИ =====
 
     // Функция для получения user_id оператора из localStorage
     function getUserId() {
@@ -573,63 +178,6 @@
                 data: data
             };
         } catch (error) {
-            return {
-                error: error.message
-            };
-        }
-    }
-
-    // Функция для получения данных письма через API mailbox/mails
-    async function fetchMailData(token, userId, manId, mailId = null) {
-        if (!token || !userId || !manId) {
-            return { error: 'Токен, user_id или man_id не найдены' };
-        }
-
-        try {
-            const payload = {
-                user_id: parseInt(userId),
-                folder: "dialog",
-                man_id: parseInt(manId),
-                page: 1
-            };
-
-            // Если указан mailId, добавляем его в payload для фильтрации
-            if (mailId) {
-                payload.mail_id = parseInt(mailId);
-            }
-
-            console.log('[Alpha Date Extension] fetchMailData - отправляем запрос:', {
-                url: 'https://alpha.date/api/mailbox/mails',
-                payload: payload
-            });
-
-            const response = await fetch('https://alpha.date/api/mailbox/mails', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json, text/plain, */*'
-                },
-                credentials: 'include',
-                body: JSON.stringify(payload)
-            });
-
-            console.log('[Alpha Date Extension] fetchMailData - ответ сервера:', {
-                status: response.status,
-                statusText: response.statusText,
-                headers: Object.fromEntries(response.headers.entries())
-            });
-
-            const data = await response.json();
-            console.log('[Alpha Date Extension] fetchMailData - данные ответа:', JSON.stringify(data, null, 2));
-
-            return {
-                status: response.status,
-                statusText: response.statusText,
-                data: data
-            };
-        } catch (error) {
-            console.error('[Alpha Date Extension] fetchMailData - ошибка:', error);
             return {
                 error: error.message
             };
@@ -1897,11 +1445,7 @@
             }
 
             // Если уже есть актуальная информация по этому чату — возвращаем её
-            const now = Date.now();
-            if (!forceRefresh && currentChatPhotoInfo &&
-                currentChatPhotoInfo.chatUid === chatUid &&
-                (now - currentChatPhotoTimestamp) < PHOTO_INFO_CACHE_TTL) {
-                console.log('[Alpha Date Extension] 📋 Используем кешированную информацию о фото чата');
+            if (!forceRefresh && currentChatPhotoInfo && currentChatPhotoInfo.chatUid === chatUid) {
                 return currentChatPhotoInfo;
             }
 
@@ -2004,8 +1548,6 @@
             lastUpdated: new Date().toISOString(),
         };
 
-        currentChatPhotoTimestamp = Date.now();
-
         return currentChatPhotoInfo;
     }
 
@@ -2022,7 +1564,7 @@
             }
 
             // Добавляем немного стилей для статуса, если ещё не добавлены
-            if (!getCachedElementById('alpha-ext-video-status-style')) {
+            if (!document.getElementById('alpha-ext-video-status-style')) {
                 const style = document.createElement('style');
                 style.id = 'alpha-ext-video-status-style';
                 style.textContent = `
@@ -2079,7 +1621,7 @@
             }
 
             // Добавляем немного стилей для статуса, если ещё не добавлены
-            if (!getCachedElementById('alpha-ext-photo-status-style')) {
+            if (!document.getElementById('alpha-ext-photo-status-style')) {
                 const style = document.createElement('style');
                 style.id = 'alpha-ext-photo-status-style';
                 style.textContent = `
@@ -2126,7 +1668,7 @@
     // --- Большое всплывающее окно с интерфейсом расширения (оверлей) ---
 
     function ensureOverlayStyles() {
-        if (getCachedElementById('alpha-ext-overlay-style')) {
+        if (document.getElementById('alpha-ext-overlay-style')) {
             return;
         }
         const style = document.createElement('style');
@@ -2210,7 +1752,7 @@
     function openBigOverlay() {
         ensureOverlayStyles();
 
-        if (getCachedElementById('alpha-ext-overlay')) {
+        if (document.getElementById('alpha-ext-overlay')) {
             return;
         }
 
@@ -2282,7 +1824,7 @@
 
     function initBigOverlayFab() {
         // маленькая плавающая кнопка только на alpha.date
-        if (getCachedElementById('alpha-ext-fab')) {
+        if (document.getElementById('alpha-ext-fab')) {
             return;
         }
 
@@ -2293,7 +1835,7 @@
         fab.textContent = 'AD';
         fab.title = 'Открыть панель Alpha Date Extension';
         fab.addEventListener('click', () => {
-            if (getCachedElementById('alpha-ext-overlay')) {
+            if (document.getElementById('alpha-ext-overlay')) {
                 document.getElementById('alpha-ext-overlay').remove();
             } else {
                 openBigOverlay();
@@ -2413,8 +1955,6 @@
     // Кэш информации о видео в текущем чате (для проверки уже отправленных видео)
     let currentChatVideoInfo = null;
     let currentChatPhotoInfo = null;
-    let currentChatPhotoTimestamp = 0;
-    const PHOTO_INFO_CACHE_TTL = 2 * 60 * 1000; // 2 минуты для информации о фото
 
     // Статистика (лайки/винки/отправленные сообщения)
     function getDefaultStats() {
@@ -2503,7 +2043,7 @@
 
             const { action, message_object, notification_object, external_id, chat_list_object } = eventData;
 
-                console.log('[Alpha Date Extension] Получено WebSocket событие:', { action, eventData });
+            console.log('[Alpha Date Extension] Получено WebSocket событие:', { action, eventData });
             
             // Фильтруем только нужные события
             if (action !== 'viewed' && action !== 'liked' && action !== 'message' && action !== 'mail' && action !== 'read_mail' && action !== 'REACTION_LIMITS') {
@@ -2542,42 +2082,7 @@
                 // Для события mail имя и возраст могут быть в других полях, но обычно их нет
                 // Оставляем manName = null для писем, так как в структуре mail их обычно нет
                 let manName = null;
-
-                // Получаем данные письма для формирования ссылки
-                let letterUrl = null;
-                let chatUid = null;
-
-                try {
-                    const token = getToken();
-                    if (token && femaleExt && maleExt && messageObjectId) {
-                        console.log('[Alpha Date Extension] Запрашиваем данные нового письма для формирования ссылки:', {
-                            femaleExt,
-                            maleExt,
-                            messageObjectId
-                        });
-
-                        const mailDataResponse = await fetchMailData(token, femaleExt, maleExt, messageObjectId);
-
-                        if (mailDataResponse.status === 200 && mailDataResponse.data?.status === true) {
-                            const chat = mailDataResponse.data?.response?.chat;
-
-                            // Ищем chat_uid в response.chat.chat_uid
-                            if (chat?.chat_uid) {
-                                chatUid = chat.chat_uid;
-                                letterUrl = `https://alpha.date/letter/${chatUid}`;
-                                console.log('[Alpha Date Extension] Сформирована ссылка на новое письмо:', letterUrl);
-                            } else {
-                                console.warn('[Alpha Date Extension] chat_uid не найден для нового письма');
-                            }
-                        } else {
-                            console.warn('[Alpha Date Extension] Не удалось получить данные нового письма:', mailDataResponse);
-                        }
-                    }
-                } catch (mailError) {
-                    console.warn('[Alpha Date Extension] Ошибка при получении данных нового письма:', mailError);
-                    // Продолжаем без ссылки на письмо
-                }
-
+                
                 // Формируем уведомление о письме
                 const text = [
                     '✉️ <b>Новое письмо</b>',
@@ -2589,12 +2094,11 @@
                     `ID письма: <code>${messageObjectId || '(не указано)'}</code>`,
                     `Лимит писем: <code>${letterLimit !== undefined ? letterLimit : '(не указано)'}</code>`,
                     updatedLimitAt ? `Обновлено: ${updatedLimitAt}` : '',
-                    letterUrl ? `\n<a href="${letterUrl}">Открыть письмо</a>` : '',
                 ].filter(Boolean).join('\n');
-
+                
                 // Отправляем уведомления (не блокируем обработку при ошибке)
                 try {
-                    await sendBrowserNotification(text, '', 'showLetters', letterUrl ? { chatUrl: letterUrl } : {});
+                    await sendBrowserNotification(text, '', 'showLetters');
                 } catch (notifError) {
                     console.warn('[Alpha Date Extension] Ошибка отправки уведомлений (не критично):', notifError);
                 }
@@ -2621,74 +2125,6 @@
                 // Получаем отображаемое имя пользователя
                 const manDisplayName = await getUserDisplayName(manExt);
 
-                // Получаем данные письма для формирования ссылки
-                let letterUrl = null;
-                let chatUid = null;
-
-                try {
-                    const token = getToken();
-                    console.log('[Alpha Date Extension] DEBUG read_mail - token exists:', !!token, 'womanExt:', womanExt, 'manExt:', manExt, 'mailIds:', mailIds);
-
-                    if (token && womanExt && manExt && mailIds.length > 0) {
-                        console.log('[Alpha Date Extension] Запрашиваем данные письма для формирования ссылки:', {
-                            womanExt,
-                            manExt,
-                            mailId: mailIds[0]
-                        });
-
-                        const mailDataResponse = await fetchMailData(token, womanExt, manExt, mailIds[0]);
-                        console.log('[Alpha Date Extension] DEBUG - mailDataResponse:', JSON.stringify(mailDataResponse, null, 2));
-
-                        if (mailDataResponse.status === 200 && mailDataResponse.data?.status === true) {
-                            const mails = mailDataResponse.data?.response?.mails || [];
-                            const chat = mailDataResponse.data?.response?.chat;
-
-                            console.log('[Alpha Date Extension] DEBUG - mails array:', mails.length, 'items');
-                            console.log('[Alpha Date Extension] DEBUG - chat object:', JSON.stringify(chat, null, 2));
-
-                            // Сначала пробуем найти chat_uid в response.chat.chat_uid
-                            if (chat?.chat_uid) {
-                                chatUid = chat.chat_uid;
-                                letterUrl = `https://alpha.date/letter/${chatUid}`;
-                                console.log('[Alpha Date Extension] Сформирована ссылка на письмо из chat.chat_uid:', letterUrl);
-                            } else if (mails.length > 0) {
-                                // Альтернативно ищем в первом письме
-                                const firstMail = mails[0];
-                                console.log('[Alpha Date Extension] DEBUG - first mail structure:', JSON.stringify(firstMail, null, 2));
-                                console.log('[Alpha Date Extension] DEBUG - mail chat object:', firstMail?.chat);
-                                console.log('[Alpha Date Extension] DEBUG - mail chr_id:', firstMail?.chr_id);
-
-                                chatUid = firstMail?.chat?.chat_uid || firstMail?.chr_id;
-                                if (chatUid) {
-                                    letterUrl = `https://alpha.date/letter/${chatUid}`;
-                                    console.log('[Alpha Date Extension] Сформирована ссылка на письмо из mail.chat_uid:', letterUrl);
-                                } else {
-                                    console.warn('[Alpha Date Extension] chat_uid не найден ни в chat, ни в mails');
-                                }
-                            } else {
-                                console.warn('[Alpha Date Extension] Массив mails пустой и chat_uid не найден в chat');
-                            }
-                        } else {
-                            console.warn('[Alpha Date Extension] API вернул ошибку или неправильный статус:', {
-                                status: mailDataResponse.status,
-                                statusText: mailDataResponse.statusText,
-                                dataStatus: mailDataResponse.data?.status,
-                                error: mailDataResponse.error
-                            });
-                        }
-                    } else {
-                        console.warn('[Alpha Date Extension] Не хватает данных для запроса:', {
-                            hasToken: !!token,
-                            womanExt,
-                            manExt,
-                            mailIdsLength: mailIds.length
-                        });
-                    }
-                } catch (mailError) {
-                    console.warn('[Alpha Date Extension] Ошибка при получении данных письма:', mailError);
-                    // Продолжаем без ссылки на письмо
-                }
-
                 const text = [
                     '📧 <b>Прочитано письмо</b>',
                     '',
@@ -2697,12 +2133,11 @@
                     `recipient_external_id (женщина): <code>${womanExt}</code>`,
                     '',
                     `ID писем: <code>${mailIds.join(', ')}</code>`,
-                    letterUrl ? `\n<a href="${letterUrl}">Открыть письмо</a>` : '',
                 ].filter(Boolean).join('\n');
 
                 // Отправляем уведомления (не блокируем обработку при ошибке)
                 try {
-                    await sendBrowserNotification(text, '', 'read_mail', letterUrl ? { chatUrl: letterUrl } : {});
+                    await sendBrowserNotification(text, '', 'read_mail');
                 } catch (notifError) {
                     console.warn('[Alpha Date Extension] Ошибка отправки уведомлений (не критично):', notifError);
                 }
@@ -2798,16 +2233,16 @@
                 createdStr,
             ];
             const key = keyParts.join('|');
-
-            // Проверяем через централизованное хранилище
-            const checkResult = await chrome.runtime.sendMessage({
-                type: 'checkAndAddSeenMessage',
-                payload: { key }
-            });
-
-            if (!checkResult.isNew) {
-                console.log('[Alpha Date Extension] Сообщение уже обработано:', key);
+            if (seenMessageKeys.has(key)) {
                 return;
+            }
+            seenMessageKeys.add(key);
+
+            // Обрезаем список увиденных сообщений, чтобы не разрастался
+            if (seenMessageKeys.size > MAX_SEEN_MESSAGES) {
+                const arr = Array.from(seenMessageKeys);
+                const tail = arr.slice(-MAX_SEEN_MESSAGES);
+                seenMessageKeys = new Set(tail);
             }
 
             const manExt = msg.sender_external_id || msg.sender_id;
@@ -2896,24 +2331,8 @@
                 const viewPhotoUrl = profileCfg.viewPhotoUrl || null;
                 const viewPhotoFilename = profileCfg.viewPhotoFilename || null;
                 const viewPhotoContentId = profileCfg.viewPhotoContentId || null;
-
+                
                 if (replyText || viewPhotoUrl) {
-                    // Проверяем блокировку автоответов
-                    const lockCheck = await chrome.runtime.sendMessage({
-                        type: 'checkOperationLock',
-                        payload: { operationType: 'autoreply' }
-                    });
-
-                    if (lockCheck.locked) {
-                        console.log('[Alpha Date Extension] Автоответ заблокирован - выполняется в другой вкладке');
-                        return;
-                    }
-
-                    // Устанавливаем блокировку на короткое время для автоответа
-                    await chrome.runtime.sendMessage({
-                        type: 'setOperationLock',
-                        payload: { operationType: 'autoreply', duration: 10000 } // 10 секунд
-                    });
                     // Проверяем connect: отправляем только если connect === 0 (новый пользователь)
                     if (connect === 1) {
                         console.log('[Alpha Date Extension] Автоответ на просмотр профиля пропущен: постоянный пользователь (connect=1)', {
@@ -2961,12 +2380,6 @@
                             console.log('[Alpha Date Extension] Автоответ на просмотр профиля отправлен успешно');
                         } catch (autoErr) {
                             console.error('[Alpha Date Extension] Ошибка автоответа на просмотр:', autoErr);
-                        } finally {
-                            // Снимаем блокировку автоответов
-                            chrome.runtime.sendMessage({
-                                type: 'clearOperationLock',
-                                payload: { operationType: 'autoreply' }
-                            });
                         }
                     }
                 } else {
@@ -3077,24 +2490,8 @@
                 const likePhotoUrl = profileCfg.likePhotoUrl || null;
                 const likePhotoFilename = profileCfg.likePhotoFilename || null;
                 const likePhotoContentId = profileCfg.likePhotoContentId || null;
-
+                
                 if (replyText || likePhotoUrl) {
-                    // Проверяем блокировку автоответов
-                    const lockCheck = await chrome.runtime.sendMessage({
-                        type: 'checkOperationLock',
-                        payload: { operationType: 'autoreply' }
-                    });
-
-                    if (lockCheck.locked) {
-                        console.log('[Alpha Date Extension] Автоответ на лайк заблокирован - выполняется в другой вкладке');
-                        return;
-                    }
-
-                    // Устанавливаем блокировку на короткое время для автоответа
-                    await chrome.runtime.sendMessage({
-                        type: 'setOperationLock',
-                        payload: { operationType: 'autoreply', duration: 10000 } // 10 секунд
-                    });
                     console.log('[Alpha Date Extension] Автоответ на лайк:', {
                         womanExt,
                         manExt,
@@ -3145,12 +2542,6 @@
                         console.log('[Alpha Date Extension] Автоответ на лайк отправлен успешно');
                     } catch (autoErr) {
                         console.error('[Alpha Date Extension] Ошибка автоответа на лайк:', autoErr);
-                    } finally {
-                        // Снимаем блокировку автоответов
-                        chrome.runtime.sendMessage({
-                            type: 'clearOperationLock',
-                            payload: { operationType: 'autoreply' }
-                        });
                     }
                 } else {
                     console.log('[Alpha Date Extension] Автоответ на лайк не настроен (likeReply пустой и фото не выбрано)');
@@ -3219,23 +2610,6 @@
                     });
                     
                     if (replyText || winkPhotoUrl) {
-                        // Проверяем блокировку автоответов
-                        const lockCheck = await chrome.runtime.sendMessage({
-                            type: 'checkOperationLock',
-                            payload: { operationType: 'autoreply' }
-                        });
-
-                        if (lockCheck.locked) {
-                            console.log('[Alpha Date Extension] Автоответ на винк заблокирован - выполняется в другой вкладке');
-                            return;
-                        }
-
-                        // Устанавливаем блокировку на короткое время для автоответа
-                        await chrome.runtime.sendMessage({
-                            type: 'setOperationLock',
-                            payload: { operationType: 'autoreply', duration: 10000 } // 10 секунд
-                        });
-
                         try {
                             // Если есть текст, отправляем текстовое сообщение
                             if (replyText) {
@@ -3276,12 +2650,6 @@
                                 error: String(autoErr),
                                 message: autoErr.message,
                                 stack: autoErr.stack
-                            });
-                        } finally {
-                            // Снимаем блокировку автоответов
-                            chrome.runtime.sendMessage({
-                                type: 'clearOperationLock',
-                                payload: { operationType: 'autoreply' }
                             });
                         }
                     } else {
@@ -3328,8 +2696,9 @@
                     if (typeof channel === 'string' && channel.startsWith('counters_profile_')) {
                         console.log('[Alpha Date Extension] Парсинг WebSocket:', { channel, action: data.action, data });
                         return { channel, data };
+                    } else {
+                        console.log('[Alpha Date Extension] Игнорируем канал:', channel, 'ожидаем counters_profile_*');
                     }
-                    // Молча игнорируем другие каналы (user_online, woman_info_channel и т.д.)
                 }
             }
         } catch (e) {
@@ -3359,45 +2728,6 @@
             return;
         }
 
-        // ПРОВЕРКА ПОДПИСКИ - мониторинг сообщений требует активной подписки
-        try {
-            const subscriptionStatus = await chrome.runtime.sendMessage({ type: 'getSubscriptionStatus' });
-            if (!subscriptionStatus.hasActiveSubscription) {
-                console.log('[Alpha Date Extension] Мониторинг сообщений заблокирован: подписка истекла');
-                return;
-            }
-        } catch (error) {
-            console.error('[Alpha Date Extension] Ошибка проверки подписки для WebSocket:', error);
-            return;
-        }
-
-        // ПРОВЕРКА СТАТУСА WEBSOCKET - простая логика с флагом в localStorage
-        try {
-            // Проверяем, запущен ли уже WebSocket в другой вкладке
-            const websocketStatus = await chrome.storage.local.get(['websocketActive']);
-            if (websocketStatus.websocketActive) {
-                console.log('[Alpha Date Extension] WebSocket уже активен в другой вкладке, пропускаем подключение');
-                return;
-            }
-
-            console.log('[Alpha Date Extension] WebSocket свободен, запускаем в этой вкладке');
-
-            // Настраиваем сброс флага при закрытии вкладки
-            window.addEventListener('beforeunload', async () => {
-                try {
-                    // Сбрасываем флаг WebSocket при закрытии вкладки
-                    await chrome.storage.local.set({ websocketActive: false });
-                    console.log('[Alpha Date Extension] Флаг WebSocket сброшен при закрытии вкладки');
-                } catch (error) {
-                    console.error('[Alpha Date Extension] Ошибка сброса флага WebSocket при закрытии:', error);
-                }
-            });
-
-        } catch (error) {
-            console.error('[Alpha Date Extension] Ошибка проверки статуса WebSocket:', error);
-            return;
-        }
-
         // Защита от множественных одновременных вызовов
         if (wsConnecting) {
             console.log('[Alpha Date Extension] Подключение уже в процессе, пропускаем...');
@@ -3409,9 +2739,6 @@
             console.log('[Alpha Date Extension] Токен не найден, WebSocket не подключён');
             return;
         }
-        
-        // Синхронизируем авто-ответы с сервером при подключении
-        await syncAutoRepliesFromServerInternal();
 
         // Проверяем, включён ли мониторинг
         const data = await chrome.storage.local.get(['monitorState']);
@@ -3461,12 +2788,6 @@
 
             wsConnection.onopen = () => {
                 console.log('[Alpha Date Extension] WebSocket подключён');
-
-                // Устанавливаем флаг, что WebSocket активен в этой вкладке
-                chrome.storage.local.set({ websocketActive: true }).catch(error => {
-                    console.error('[Alpha Date Extension] Ошибка установки флага WebSocket:', error);
-                });
-
                 wsReconnectAttempts = 0;
                 wsConnecting = false; // Сбрасываем флаг после успешного подключения
                 lastPongTime = Date.now(); // Инициализируем время последнего pong
@@ -3520,6 +2841,7 @@
                     
                     // Парсим Socket.IO сообщения (формат: 42["event", data])
                     // parseSocketIOMessage уже фильтрует только каналы counters_profile_*
+                    console.log('[Alpha Date Extension] Сырые WebSocket данные:', rawData);
                     const parsed = parseSocketIOMessage(rawData);
                     if (parsed && parsed.data) {
                         // Логируем только важные события (viewed, viewed_photos, liked, message, mail, read_mail, REACTION_LIMITS), не все подряд
@@ -3541,18 +2863,7 @@
             };
 
             wsConnection.onerror = (error) => {
-                console.error('[Alpha Date Extension] WebSocket ошибка:', {
-                    type: error.type,
-                    target: error.target ? error.target.url : 'unknown',
-                    message: error.message || 'No message',
-                    error: error
-                });
-
-                // Сбрасываем флаг WebSocket активности при ошибке
-                chrome.storage.local.set({ websocketActive: false }).catch(error => {
-                    console.error('[Alpha Date Extension] Ошибка сброса флага WebSocket:', error);
-                });
-
+                console.error('[Alpha Date Extension] WebSocket ошибка:', error);
                 wsConnecting = false; // Сбрасываем флаг при ошибке
             };
 
@@ -3562,12 +2873,6 @@
                     reason: event.reason,
                     wasClean: event.wasClean
                 });
-
-                // Сбрасываем флаг WebSocket активности
-                chrome.storage.local.set({ websocketActive: false }).catch(error => {
-                    console.error('[Alpha Date Extension] Ошибка сброса флага WebSocket:', error);
-                });
-
                 stopWebSocketPing();
                 wsConnection = null;
                 wsInitialized = false;
@@ -3830,47 +3135,27 @@
                 }
             }
         } else {
-            // Для чатов отправляем все сообщения параллельно через Promise.all
-            console.log('[Alpha Date Extension] Запуск параллельной рассылки чатов:', targets.length, 'сообщений');
-
-            const messagePromises = targets.map(async (t, index) => {
+            // Для чатов отправляем по одному сообщению на каждую пару женщина–мужчина
+            let successfulChats = 0;
+            for (const t of targets) {
                 try {
                     const result = await sendMessageToChat(token, t.woman_external_id, t.man_external_id, message);
                     if (result && result.success) {
-                        console.log(`[Alpha Date Extension] Сообщение ${index + 1}/${targets.length} отправлено успешно`);
-                        return { success: true, target: t };
+                        sent += 1;
+                        successfulChats += 1;
+                        // Увеличиваем счетчик успешных отправок чатов
+                        await incrementStats({ successfulChatMessages: 1 });
                     } else {
-                        console.log(`[Alpha Date Extension] Сообщение ${index + 1}/${targets.length} не отправлено:`, result?.error);
-                        return { success: false, target: t, error: result?.error };
+                        failed += 1;
+                        console.log('[Alpha Date Extension] Сообщение не отправлено (status: false):', result?.error);
                     }
+                    await sleep(500);
                 } catch (error) {
-                    console.error(`[Alpha Date Extension] Ошибка отправки сообщения ${index + 1}/${targets.length}:`, error);
-                    return { success: false, target: t, error: error.message };
-                }
-            });
-
-            // Ждем завершения всех отправок
-            const results = await Promise.all(messagePromises);
-
-            // Подсчитываем результаты
-            let successfulChats = 0;
-            for (const result of results) {
-                if (result.success) {
-                    sent += 1;
-                    successfulChats += 1;
-                    // Увеличиваем счетчик успешных отправок чатов
-                    await incrementStats({ successfulChatMessages: 1 });
-                } else {
                     failed += 1;
+                    console.error('[Alpha Date Extension] Ошибка отправки сообщения:', error);
+                    await sleep(500);
                 }
             }
-
-            console.log('[Alpha Date Extension] Параллельная рассылка завершена:', {
-                total: targets.length,
-                sent,
-                failed,
-                successRate: `${((sent / targets.length) * 100).toFixed(1)}%`
-            });
         }
 
         const stats = {
@@ -4268,38 +3553,12 @@
             }
 
             if (message.type === 'startBroadcastAll') {
-                // Проверяем блокировку операции перед запуском рассылки
-                chrome.runtime.sendMessage({ type: 'checkOperationLock', payload: { operationType: 'broadcast' } })
-                    .then(lockCheck => {
-                        if (lockCheck.locked) {
-                            console.log('[Alpha Date Extension] Рассылка заблокирована - выполняется в другой вкладке');
-                            sendResponse({ ok: false, error: 'Рассылка уже выполняется в другой вкладке' });
-                            return;
-                        }
-
-                        const queue = (message.payload && message.payload.queue) || [];
-                        startBroadcastQueue(queue)
-                            .then(() => {
-                                // Снимаем блокировку после успешного завершения
-                                chrome.runtime.sendMessage({
-                                    type: 'clearOperationLock',
-                                    payload: { operationType: 'broadcast' }
-                                });
-                                sendResponse({ ok: true });
-                            })
-                            .catch(error => {
-                                console.error('[Alpha Date Extension] Ошибка запуска глобальной рассылки:', error);
-                                // Снимаем блокировку при ошибке
-                                chrome.runtime.sendMessage({
-                                    type: 'clearOperationLock',
-                                    payload: { operationType: 'broadcast' }
-                                });
-                                sendResponse({ ok: false, error: error.message || String(error) });
-                            });
-                    })
+                const queue = (message.payload && message.payload.queue) || [];
+                startBroadcastQueue(queue)
+                    .then(() => sendResponse({ ok: true }))
                     .catch(error => {
-                        console.error('[Alpha Date Extension] Ошибка проверки блокировки:', error);
-                        sendResponse({ ok: false, error: 'Ошибка проверки блокировки' });
+                        console.error('[Alpha Date Extension] Ошибка запуска глобальной рассылки:', error);
+                        sendResponse({ ok: false, error: error.message || String(error) });
                     });
 
                 return true;
@@ -4312,21 +3571,6 @@
                     connectWebSocket();
                 }, 500);
                 sendResponse({ ok: true });
-                return true;
-            }
-            
-            // Синхронизация авто-ответов с сервером
-            if (message.type === 'syncAutoReplies') {
-                const direction = message.direction || 'download'; // 'download' или 'upload'
-                if (direction === 'download') {
-                    syncAutoRepliesFromServer(true)
-                        .then(result => sendResponse({ ok: true, synced: result }))
-                        .catch(error => sendResponse({ ok: false, error: error.message }));
-                } else {
-                    syncAutoRepliesToServer()
-                        .then(result => sendResponse({ ok: true, synced: result }))
-                        .catch(error => sendResponse({ ok: false, error: error.message }));
-                }
                 return true;
             }
 
@@ -4476,15 +3720,6 @@
                     token: token,
                     userId: userId,
                     apiBase: API_BASE
-                });
-                return true;
-            }
-            
-            if (message.type === 'getOperatorEmail') {
-                // Возвращаем email оператора для синхронизации авто-ответов
-                const email = getOperatorEmail();
-                sendResponse({
-                    email: email
                 });
                 return true;
             }
@@ -4892,21 +4127,6 @@
     // Запуск системы автообновления
     function initAutoRefresh() {
         console.log('[Alpha Date Extension] Запуск автообновления страницы при бездействии');
-
-        // ПРОВЕРКА ПОДПИСКИ - автообновление требует активной подписки
-        chrome.runtime.sendMessage({ type: 'getSubscriptionStatus' }, (response) => {
-            if (!response || !response.hasActiveSubscription) {
-                console.log('[Alpha Date Extension] Автообновление заблокировано: подписка истекла');
-                // Скрываем таймер если он был показан
-                if (countdownElement) {
-                    countdownElement.style.display = 'none';
-                }
-                return;
-            }
-
-            // Подписка активна, продолжаем инициализацию
-            console.log('[Alpha Date Extension] Автообновление разрешено: подписка активна');
-        });
 
         // Создаём элемент таймера
         createCountdownTimer();

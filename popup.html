@@ -45,28 +45,6 @@
             padding-bottom: 20px;
             border-bottom: 2px solid transparent;
             border-image: linear-gradient(90deg, transparent, #007AFF, transparent) 1;
-            position: relative;
-        }
-
-        .logout-btn {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            padding: 8px 16px;
-            background: rgba(255, 77, 79, 0.2);
-            border: 1px solid rgba(255, 77, 79, 0.5);
-            border-radius: 8px;
-            color: #ff4d4f;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-
-        .logout-btn:hover {
-            background: rgba(255, 77, 79, 0.3);
-            border-color: #ff4d4f;
-            transform: translateY(-1px);
         }
 
         .header h1 {
@@ -78,28 +56,6 @@
             background-clip: text;
             margin-bottom: 8px;
             letter-spacing: 0.5px;
-        }
-
-        .subscription-info {
-            background: rgba(0, 122, 255, 0.1);
-            border: 1px solid rgba(0, 122, 255, 0.3);
-            border-radius: 8px;
-            padding: 8px 12px;
-            margin-top: 8px;
-            font-size: 12px;
-            text-align: center;
-        }
-
-        .subscription-info.expired {
-            background: rgba(255, 77, 79, 0.1);
-            border-color: rgba(255, 77, 79, 0.3);
-            color: #ff6b6b;
-        }
-
-        .subscription-info.warning {
-            background: rgba(255, 165, 0, 0.1);
-            border-color: rgba(255, 165, 0, 0.3);
-            color: #ffaa00;
         }
 
         .status {
@@ -1818,12 +1774,8 @@
 </head>
 <body>
     <div class="header">
-        <button class="logout-btn" id="logoutBtn">Выйти</button>
         <h1>Alpha Date Extension</h1>
         <div class="status" id="status">Загрузка...</div>
-        <div class="subscription-info" id="subscriptionInfo" style="display: none;">
-            Загрузка информации о подписке...
-        </div>
         <div class="progress-container">
             <div class="progress-bar-bg">
                 <div class="progress-bar-fill" id="progressBar"></div>
@@ -1839,6 +1791,14 @@
             <button class="control-btn" id="refreshBtn" title="Обновить данные">
                 <span class="control-icon">🔄</span>
                 <span class="control-text">Обновить</span>
+            </button>
+            <button class="control-btn" id="broadcastAllBtn" title="Запустить рассылку по всем анкетам (чаты)">
+                <span class="control-icon">📢</span>
+                <span class="control-text">Рассылка (чаты)</span>
+            </button>
+            <button class="control-btn" id="broadcastLettersAllBtn" title="Запустить рассылку по всем анкетам (письма)">
+                <span class="control-icon">✉️</span>
+                <span class="control-text">Рассылка (письма)</span>
             </button>
         </div>
         <div class="status-indicator" id="quickStatus"></div>
@@ -1872,10 +1832,6 @@
         <button class="tab-button" data-tab="maybe" title="Массовое добавление в Maybe">
             <span class="tab-icon">⭐</span>
             <span class="tab-text">Maybe</span>
-        </button>
-        <button class="tab-button lord-tab" data-tab="lord" title="Лорд функции" style="display: none;">
-            <span class="tab-icon">👑</span>
-            <span class="tab-text">Лорд</span>
         </button>
     </div>
 
@@ -2384,10 +2340,7 @@
                 <div class="stats-item-improved">
                     <div class="stats-icon">✅</div>
                     <div class="stats-content">
-                        <div class="stats-label">
-                            Успешно добавлено
-                            <button id="maybeSuccessDetailsBtn" class="stats-arrow-btn" style="background: none; border: none; color: #00ff88; cursor: pointer; font-size: 14px; margin-left: 8px; padding: 2px 4px; border-radius: 3px;" title="Показать детали">▼</button>
-                        </div>
+                        <div class="stats-label">Успешно добавлено</div>
                         <div class="stats-value-large" id="maybeSuccessCount">0</div>
                     </div>
                 </div>
@@ -2405,75 +2358,6 @@
                         <div class="stats-value-large" id="maybeErrorCount">0</div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Вкладка Лорд -->
-    <div class="tab-section" data-tab="lord">
-        <div class="section">
-            <div style="padding: 20px;">
-                <div style="text-align: center; margin-bottom: 30px;">
-                    <div style="font-size: 36px; margin-bottom: 10px;">👑</div>
-                    <h2 style="color: #ffffff; margin-bottom: 8px; font-size: 20px;">Управление ключами</h2>
-                    <p style="color: #a0a0a0; font-size: 14px;">
-                        Отслеживайте ключи операторов и контролируйте сроки подписок
-                    </p>
-                </div>
-
-                <!-- Форма добавления ключа -->
-                <div style="margin-bottom: 30px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                        <h3 style="color: #ffffff; font-size: 16px;">➕ Добавить ключ для отслеживания</h3>
-                        <button id="refreshTrackedKeysBtn" style="background: rgba(255, 255, 255, 0.1); color: #ffffff; border: 1px solid rgba(255, 255, 255, 0.2); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;">
-                            🔄 Обновить
-                        </button>
-                    </div>
-
-                    <div style="background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 16px;">
-                        <div style="display: grid; gap: 12px;">
-                            <div>
-                                <label style="display: block; margin-bottom: 4px; font-size: 12px; color: #ffffff; font-weight: 600;">Ключ доступа:</label>
-                                <input type="text" id="trackedKeyValue" placeholder="Введите key_value" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(0, 0, 0, 0.3); color: #ffffff; font-size: 13px;">
-                            </div>
-                            <div>
-                                <label style="display: block; margin-bottom: 4px; font-size: 12px; color: #ffffff; font-weight: 600;">Имя пользователя:</label>
-                                <input type="text" id="trackedUserName" placeholder="Имя оператора (опционально)" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(0, 0, 0, 0.3); color: #ffffff; font-size: 13px;">
-                            </div>
-                            <button id="addTrackedKeyBtn" style="background: linear-gradient(135deg, #007AFF, #00a6ff); color: white; border: none; padding: 12px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; width: 100%;">
-                                ➕ Добавить ключ
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Список отслеживаемых ключей -->
-                <div style="margin-bottom: 20px;">
-                    <h3 style="color: #ffffff; font-size: 16px; margin-bottom: 16px;">📋 Отслеживаемые ключи</h3>
-
-                    <div id="trackedKeysList" style="max-height: 400px; overflow-y: auto; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px;">
-                        <div style="padding: 20px; text-align: center; color: #a0a0a0;">
-                            Загрузка ключей...
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Модальное окно для деталей успешно добавленных профилей -->
-    <div id="successProfilesModal" class="modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.8); z-index: 10000; align-items: center; justify-content: center;">
-        <div class="modal-content" style="background: rgba(30, 30, 30, 0.95); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 12px; padding: 24px; max-width: 600px; width: 90%; max-height: 80%; overflow-y: auto;">
-            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                <h3 style="color: #ffffff; margin: 0; font-size: 20px;">✅ Успешно добавленные профили</h3>
-                <button id="closeSuccessProfilesModal" class="close-btn" style="background: rgba(255, 77, 79, 0.2); border: 1px solid rgba(255, 77, 79, 0.5); color: #ff4d4f; border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 16px;">✕</button>
-            </div>
-            <div id="successProfilesList" class="profiles-list" style="color: #ffffff;">
-                <!-- Список профилей будет добавлен динамически -->
-            </div>
-            <div class="modal-footer" style="margin-top: 20px; text-align: center;">
-                <button id="checkZeroActionsBtn" class="button small" style="background: rgba(255, 165, 0, 0.2); border: 1px solid rgba(255, 165, 0, 0.5); color: #ff8c00; margin-right: 8px;">🔍 Проверить нулевые действия</button>
-                <button id="clearSuccessProfilesBtn" class="button small" style="background: rgba(255, 193, 7, 0.2); border: 1px solid rgba(255, 193, 7, 0.5); color: #ffc107;">🗑️ Очистить список</button>
             </div>
         </div>
     </div>

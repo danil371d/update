@@ -12,12 +12,11 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://alpha.date/*",
-    "https://*.railway.app/*"
+    "https://alpha.date/*"
   ],
   "web_accessible_resources": [
     {
-      "resources": ["popup.html", "popup.js", "auth.html", "auth.js"],
+      "resources": ["popup.html", "popup.js"],
       "matches": ["https://alpha.date/*"]
     }
   ],
@@ -33,7 +32,7 @@
     "service_worker": "background.js"
   },
   "side_panel": {
-    "default_path": "auth.html"
+    "default_path": "popup.html"
   },
   "icons": {
     "16": "icon16.png",

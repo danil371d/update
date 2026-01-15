@@ -1,388 +1,6 @@
 // Popup script для отображения токена и результатов API запроса
 
-// Конфигурация сервера
-const SERVER_URL = 'https://alpha-production-5ab0.up.railway.app';
-
-// Режим отладки (включить для диагностики)
-const DEBUG_MODE = false;
-
-// Глобальный массив для хранения успешно добавленных профилей (UID и ID)
-let successfulProfiles = [];
-
-// Глобальные переменные для модального окна
-let successProfilesModal, closeSuccessProfilesModal, successProfilesList, clearSuccessProfilesBtn, maybeSuccessDetailsBtn, checkZeroActionsBtn;
-
-// Функция логирования (только в debug режиме)
-function log(...args) {
-    if (DEBUG_MODE) {
-        console.log('[Alpha Date Extension]', ...args);
-    }
-}
-
-// Функция логирования ошибок (всегда)
-function logError(...args) {
-    console.error('[Alpha Date Extension]', ...args);
-}
-
-// ===== СИСТЕМА КЕШИРОВАНИЯ ДЛЯ POPUP =====
-// Локальный кеш для popup (используем chrome.storage.local для персистентности)
-const POPUP_CACHE_TTL = 5 * 60 * 1000; // 5 минут для popup
-
-// Функция получения данных из popup кеша
-async function getPopupCache(key) {
-    try {
-        const cacheKey = `popup_cache_${key}`;
-        const result = await chrome.storage.local.get([cacheKey]);
-
-        if (!result[cacheKey]) return null;
-
-        const item = result[cacheKey];
-        const now = Date.now();
-
-        if (now - item.timestamp > POPUP_CACHE_TTL) {
-            // Кеш устарел, удаляем
-            await chrome.storage.local.remove([cacheKey]);
-            return null;
-        }
-
-        return item.data;
-    } catch (error) {
-        logError('Ошибка чтения из popup кеша:', error);
-        return null;
-    }
-}
-
-// Функция сохранения данных в popup кеш
-async function setPopupCache(key, data) {
-    try {
-        const cacheKey = `popup_cache_${key}`;
-        await chrome.storage.local.set({
-            [cacheKey]: {
-                data: data,
-                timestamp: Date.now()
-            }
-        });
-    } catch (error) {
-        logError('Ошибка сохранения в popup кеш:', error);
-    }
-}
-
-// Функция очистки popup кеша
-async function clearPopupCache() {
-    try {
-        const keys = await chrome.storage.local.get(null);
-        const cacheKeys = Object.keys(keys).filter(key => key.startsWith('popup_cache_'));
-
-        if (cacheKeys.length > 0) {
-            await chrome.storage.local.remove(cacheKeys);
-            log('Popup кеш очищен');
-        }
-    } catch (error) {
-        logError('Ошибка очистки popup кеша:', error);
-    }
-}
-
-// Проверка авторизации - единственный способ получить доступ к интерфейсу
-async function checkAuthStatus() {
-    try {
-        const response = await chrome.runtime.sendMessage({ type: 'getAuthStatus' });
-
-        if (!response.authorized) {
-            // Авторизация не пройдена - блокируем доступ
-            showAccessDenied();
-            return false;
-        }
-
-        // Сохраняем привилегию пользователя глобально
-        window.userPrivilege = response.privilege || 'operator';
-
-        // Авторизация активна - загружаем информацию о подписке и инициализируем интерфейс
-        await loadSubscriptionInfo();
-        await initializeTabsBasedOnPrivilege();
-        return true;
-    } catch (error) {
-        console.error('Ошибка проверки авторизации:', error);
-        showAccessDenied();
-        return false;
-    }
-}
-
-// Загрузка и отображение информации о подписке
-async function loadSubscriptionInfo() {
-    try {
-        // Проверяем, что контекст расширения еще валиден
-        if (!chrome || !chrome.storage || !chrome.storage.local) {
-            console.log('[Subscription] Контекст расширения недействителен, пропускаем проверку');
-            return;
-    }
-
-        // Получаем session token
-        const { sessionToken } = await chrome.storage.local.get(['sessionToken']);
-        if (!sessionToken) return;
-
-        // Проверяем, что DOM еще доступен
-        const subscriptionInfo = document.getElementById('subscriptionInfo');
-        if (!subscriptionInfo) {
-            console.log('[Subscription] Элемент subscriptionInfo не найден, пропускаем');
-            return;
-        }
-
-        // Запрашиваем информацию о подписке
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 секунд таймаут
-
-        const response = await fetch(`${SERVER_URL}/api/subscription-info`, {
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${sessionToken}`,
-                'Content-Type': 'application/json'
-            },
-            signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-
-        // Проверяем, что элемент все еще существует (popup мог закрыться)
-        if (!document.getElementById('subscriptionInfo')) {
-            console.log('[Subscription] Popup закрыт во время запроса, игнорируем результат');
-        return;
-    }
-
-        if (response.ok) {
-            const data = await response.json();
-
-            if (data.has_subscription) {
-                let message = '';
-                let className = 'subscription-info';
-
-                if (data.is_expired) {
-                    message = '⚠️ Подписка истекла';
-                    className += ' expired';
-                } else if (data.days_remaining !== null) {
-                    // Вычисляем точное время: дни + часы
-                    const now = new Date();
-                    const expiresAt = new Date(data.expires_at);
-                    const diffMs = expiresAt - now;
-                    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-                    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-
-                    if (diffDays <= 0 && diffHours <= 0) {
-                        message = '⚠️ Подписка истекла';
-                        className += ' expired';
-                    } else if (diffDays <= 0) {
-                        message = `⏰ Осталось ${diffHours} ч`;
-                        className += ' warning';
-                    } else if (diffDays <= 1) {
-                        message = `⏰ Осталось ${diffDays} д ${diffHours} ч`;
-                        className += ' warning';
-                    } else if (diffDays <= 3) {
-                        message = `⏰ Осталось ${diffDays} д ${diffHours} ч`;
-                        className += ' warning';
-                    } else if (diffDays <= 7) {
-                        message = `⏰ Осталось ${diffDays} д`;
-                        className += ' warning';
-                    } else {
-                        message = `✅ Осталось ${diffDays} д`;
-            }
-        } else {
-                    message = '✅ Бессрочная подписка';
-        }
-
-                subscriptionInfo.textContent = message;
-                subscriptionInfo.className = className;
-                subscriptionInfo.style.display = 'block';
-            } else {
-                subscriptionInfo.textContent = '❌ Подписка не найдена';
-                subscriptionInfo.className = 'subscription-info expired';
-                subscriptionInfo.style.display = 'block';
-        }
-        } else {
-            // Не показываем ошибку при network ошибках в фоне
-            console.log('[Subscription] Не удалось загрузить статус подписки:', response.status);
-        }
-    } catch (error) {
-        // Gracefully обрабатываем ошибки контекста
-        if (error.message && error.message.includes('Extension context invalidated')) {
-            console.log('[Subscription] Контекст расширения инвалидирован - это нормально');
-            return;
-        }
-
-        console.error('Ошибка загрузки информации о подписке:', error);
-
-        // Проверяем, что элемент еще существует
-        const subscriptionInfo = document.getElementById('subscriptionInfo');
-        if (subscriptionInfo) {
-            subscriptionInfo.textContent = '❓ Ошибка загрузки статуса подписки';
-            subscriptionInfo.className = 'subscription-info';
-            subscriptionInfo.style.display = 'block';
-                }
-            }
-}
-
-// Инициализация вкладок в зависимости от привилегии пользователя
-async function initializeTabsBasedOnPrivilege() {
-    const userPrivilege = window.userPrivilege || 'operator';
-    const lordTab = document.querySelector('.lord-tab');
-
-    if (userPrivilege === 'lord') {
-        // Показываем вкладку Лорд для пользователей с соответствующей привилегией
-        if (lordTab) {
-            lordTab.style.display = 'flex';
-            console.log('[Alpha Date Extension] Вкладка "Лорд" активирована');
-            // Инициализируем функциональность вкладки
-            await initializeLordTab();
-        }
-    } else {
-        // Скрываем вкладку Лорд для обычных операторов
-        if (lordTab) {
-            lordTab.style.display = 'none';
-            console.log('[Alpha Date Extension] Вкладка "Лорд" скрыта (недостаточно привилегий)');
-        }
-    }
-}
-
-// Автоматическая проверка статуса подписки
-function startSubscriptionStatusCheck() {
-    // Для точного отображения времени - проверяем каждую секунду
-    const CHECK_INTERVAL = 1 * 1000; // 1 секунда
-
-    let intervalId = null;
-
-    // Функция безопасной проверки
-    const safeCheck = () => {
-        // Проверяем, что popup все еще открыт и контекст валиден
-        if (!document.body || !chrome || !chrome.storage) {
-            console.log('[Subscription] Popup закрыт, останавливаем проверки');
-            if (intervalId) {
-                clearInterval(intervalId);
-                intervalId = null;
-            }
-            return;
-        }
-
-        loadSubscriptionInfo();
-    };
-
-    // Первая проверка через 1 секунду после загрузки
-    const initialTimeout = setTimeout(() => {
-        safeCheck();
-    }, 1000);
-
-    // Затем проверяем каждые 30 секунд
-    intervalId = setInterval(() => {
-        safeCheck();
-    }, CHECK_INTERVAL);
-
-    // Проверяем при возвращении к расширению (visibilitychange)
-    document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) {
-            // Небольшая задержка перед проверкой
-            setTimeout(() => {
-                safeCheck();
-            }, 500);
-        }
-    });
-
-    // Останавливаем проверки при выгрузке страницы
-    window.addEventListener('beforeunload', () => {
-        if (intervalId) {
-            clearInterval(intervalId);
-            intervalId = null;
-        }
-        clearTimeout(initialTimeout);
-    });
-
-    console.log(`[Subscription] Автопроверка статуса каждую секунду (максимальная точность)`);
-    console.log(`[Subscription] Дополнительная проверка при возвращении к расширению`);
-}
-
-// Показ блокировки доступа
-function showAccessDenied() {
-    const body = document.body;
-    if (body) {
-        const container = document.createElement('div');
-        container.style.cssText = `
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 50%, #2a2a2a 100%);
-            color: #ffffff;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-            padding: 20px;
-        `;
-
-        const errorBox = document.createElement('div');
-        errorBox.style.cssText = `
-            text-align: center;
-            max-width: 500px;
-            background: rgba(255, 255, 255, 0.02);
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
-        `;
-
-        const title = document.createElement('h2');
-        title.textContent = 'Доступ заблокирован';
-        title.style.cssText = 'color: #ff4444; margin-bottom: 20px; font-size: 24px;';
-
-        const message = document.createElement('p');
-        message.textContent = 'Требуется авторизация для доступа к системе.';
-        message.style.cssText = 'color: #cccccc; margin-bottom: 15px; line-height: 1.5; font-size: 16px;';
-
-        const hint = document.createElement('p');
-        hint.textContent = 'Используйте ключ доступа для активации.';
-        hint.style.cssText = 'color: #888888; margin-bottom: 30px; font-size: 14px;';
-
-        const authBtn = document.createElement('button');
-        authBtn.textContent = 'Авторизоваться';
-        authBtn.style.cssText = `
-            padding: 16px 32px;
-            background: linear-gradient(135deg, #1a1a1a, #2a2a2a);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            color: #ffffff;
-            font-size: 16px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s;
-            margin-right: 10px;
-        `;
-        authBtn.addEventListener('click', () => {
-            window.location.href = 'auth.html';
-        });
-
-        errorBox.appendChild(title);
-        errorBox.appendChild(message);
-        errorBox.appendChild(hint);
-        errorBox.appendChild(authBtn);
-        container.appendChild(errorBox);
-
-        body.innerHTML = '';
-        body.appendChild(container);
-        }
-    }
-
 document.addEventListener('DOMContentLoaded', async function() {
-    // Инициализируем глобальные переменные для модального окна
-    successProfilesModal = document.getElementById('successProfilesModal');
-    closeSuccessProfilesModal = document.getElementById('closeSuccessProfilesModal');
-    successProfilesList = document.getElementById('successProfilesList');
-    clearSuccessProfilesBtn = document.getElementById('clearSuccessProfilesBtn');
-    maybeSuccessDetailsBtn = document.getElementById('maybeSuccessDetailsBtn');
-    checkZeroActionsBtn = document.getElementById('checkZeroActionsBtn');
-
-
-    // Проверяем авторизацию перед загрузкой интерфейса
-    const isAuthorized = await checkAuthStatus();
-    if (!isAuthorized) {
-        return; // showAccessDenied уже заблокировал доступ
-    }
-
-    // Запускаем автоматическую проверку статуса подписки
-    startSubscriptionStatusCheck();
     const tokenDisplay = document.getElementById('tokenDisplay');
     const responseInfo = document.getElementById('responseInfo');
     const status = document.getElementById('status');
@@ -404,6 +22,8 @@ document.addEventListener('DOMContentLoaded', async function() {
     const mirrorCheckStatus = document.getElementById('mirrorCheckStatus');
     const mirrorCheckHint = document.getElementById('mirrorCheckHint');
     const refreshBtn = document.getElementById('refreshBtn');
+    const broadcastAllBtn = document.getElementById('broadcastAllBtn');
+    const broadcastLettersAllBtn = document.getElementById('broadcastLettersAllBtn');
     const broadcastStatus = document.getElementById('broadcastStatus');
     const progressBar = document.getElementById('progressBar');
     const progressLabel = document.getElementById('progressLabel');
@@ -452,9 +72,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Элементы для автообновления
     const autoRefreshEnabled = document.getElementById('autoRefreshEnabled');
 
-    // Элемент кнопки выхода
-    const logoutBtn = document.getElementById('logoutBtn');
-
     // Элементы для массового добавления в Maybe
     const maybeIdsInput = document.getElementById('maybeIdsInput');
     const addToMaybeBtn = document.getElementById('addToMaybeBtn');
@@ -465,8 +82,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     const maybeSuccessCount = document.getElementById('maybeSuccessCount');
     const maybeNotFoundCount = document.getElementById('maybeNotFoundCount');
     const maybeErrorCount = document.getElementById('maybeErrorCount');
-
-    // Элементы модального окна для деталей успешно добавленных профилей (уже инициализированы глобально)
 
     // Элементы для поиска по чату
     const extractChatUidBtn = document.getElementById('extractChatUidBtn');
@@ -499,7 +114,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 
                 // Проверяем основной флаг уведомлений
                 if (notifSettings.notificationsEnabled === false) {
-                    log('Уведомления отключены, пропускаем:', notificationType);
+                    console.log('[Alpha Date Extension] Уведомления отключены, пропускаем:', notificationType);
                     return;
                 }
 
@@ -636,7 +251,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
 
             await chrome.storage.local.set({ notificationsHistory: history });
-            log('Уведомление сохранено в историю:', notificationWithId);
+            console.log('[Alpha Date Extension] Уведомление сохранено в историю:', notificationWithId);
 
             // Обновляем таблицу уведомлений если вкладка активна
             if (document.querySelector('.tab-button[data-tab="notifications"].active')) {
@@ -772,10 +387,10 @@ document.addEventListener('DOMContentLoaded', async function() {
         tabButtons.forEach((btn) => {
             if (btn.dataset.tab === tabName) {
                 btn.classList.add('active');
-                } else {
+            } else {
                 btn.classList.remove('active');
-                }
-            });
+            }
+        });
 
         tabSections.forEach((section) => {
             if (section.dataset.tab === tabName) {
@@ -783,8 +398,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             } else {
                 section.classList.remove('active');
             }
-            });
-
+        });
+        
         // При переключении на вкладку "checks" проверяем доступность кнопок
         if (tabName === 'checks') {
             checkVideoButtonAvailability();
@@ -823,7 +438,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         });
         // Стартовая вкладка — "Анкеты"
         setActiveTab('profiles');
-            }
+    }
 
     // Локальный кэш текстов по анкетам:
     // { [externalId]: { chat?: string, letter?: string, winkReply?: string, likeReply?: string } }
@@ -833,333 +448,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     let profileDefaultLetterTexts = {};
     // Флаг, что сейчас идёт глобальная рассылка
     let isBroadcastingAll = false;
-    
-    // ===== СИНХРОНИЗАЦИЯ АВТО-ОТВЕТОВ С СЕРВЕРОМ =====
-    let isSyncing = false; // Флаг для предотвращения параллельных синхронизаций
-    let skipNextStorageSync = false; // Флаг для пропуска синхронизации после загрузки с сервера
-    
-    /**
-     * Получает вкладку alpha.date (активную или любую)
-     */
-    async function getAlphaDateTab() {
-        try {
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            if (tab && tab.url && tab.url.includes('alpha.date')) {
-                return tab;
-            }
-            // Попробуем найти любую вкладку alpha.date
-            const alphaTabs = await chrome.tabs.query({ url: '*://*.alpha.date/*' });
-            if (alphaTabs.length > 0) {
-                return alphaTabs[0];
-            }
-            return null;
-        } catch (error) {
-            console.warn('[Sync] Ошибка поиска вкладки alpha.date:', error);
-            return null;
-        }
-    }
-    
-    /**
-     * Получает email оператора из localStorage сайта alpha.date через content script
-     */
-    async function getOperatorEmail() {
-        try {
-            const tab = await getAlphaDateTab();
-            if (!tab) {
-                console.log('[Sync] Вкладка alpha.date не найдена');
-                return null;
-            }
-            
-            // Получаем email через content script
-            const response = await chrome.tabs.sendMessage(tab.id, { type: 'getOperatorEmail' });
-            if (response && response.email) {
-                return response.email;
-            }
-            return null;
-        } catch (error) {
-            console.warn('[Sync] Ошибка получения email оператора:', error);
-            return null;
-        }
-    }
-    
-    /**
-     * Вызывает синхронизацию авто-ответов через content script
-     */
-    async function triggerSyncViaContentScript(direction = 'download') {
-        try {
-            const tab = await getAlphaDateTab();
-            if (!tab) {
-                console.log('[Sync] Вкладка alpha.date не найдена для синхронизации');
-                return false;
-            }
-            
-            const response = await chrome.tabs.sendMessage(tab.id, { 
-                type: 'syncAutoReplies', 
-                direction: direction 
-            });
-            
-            if (response && response.ok) {
-                console.log('[Sync] ✅ Синхронизация через content script:', response);
-                return response.synced;
-            }
-            return false;
-        } catch (error) {
-            console.warn('[Sync] Ошибка синхронизации через content script:', error);
-            return false;
-        }
-    }
-    
-    /**
-     * Синхронизирует авто-ответы на сервер (СРАЗУ, без задержки)
-     * Привязка по email оператора (одинаковый для админа и оператора)
-     */
-    async function syncAutoRepliesToServer() {
-        if (isSyncing) {
-            console.log('[Sync] Синхронизация уже выполняется, пропускаем...');
-            return false;
-        }
-        
-        isSyncing = true;
-        try {
-            const operatorEmail = await getOperatorEmail();
-            if (!operatorEmail) {
-                console.log('[Sync] Email оператора не найден, синхронизация пропущена');
-                return false;
-            }
-            
-            // Получаем актуальные данные из storage
-            const data = await chrome.storage.local.get(['profileBroadcastMessages']);
-            const autoReplies = data.profileBroadcastMessages || {};
-            
-            // Собираем авто-ответы (включая пустые поля для синхронизации удалений)
-            const autoRepliesOnly = {};
-            for (const [profileId, config] of Object.entries(autoReplies)) {
-                const filtered = {};
-                // Всегда включаем все поля - пустые значения тоже важны для синхронизации
-                filtered.winkReply = config.winkReply || '';
-                filtered.winkPhotoUrl = config.winkPhotoUrl || '';
-                filtered.winkPhotoFilename = config.winkPhotoFilename || '';
-                filtered.winkPhotoContentId = config.winkPhotoContentId || '';
-                filtered.likeReply = config.likeReply || '';
-                filtered.likePhotoUrl = config.likePhotoUrl || '';
-                filtered.likePhotoFilename = config.likePhotoFilename || '';
-                filtered.likePhotoContentId = config.likePhotoContentId || '';
-                filtered.viewReply = config.viewReply || '';
-                filtered.viewPhotoUrl = config.viewPhotoUrl || '';
-                filtered.viewPhotoFilename = config.viewPhotoFilename || '';
-                filtered.viewPhotoContentId = config.viewPhotoContentId || '';
-                
-                // Проверяем есть ли хоть что-то непустое (чтобы не создавать пустые профили)
-                const hasAnyValue = Object.values(filtered).some(v => v && v.length > 0);
-                if (hasAnyValue) {
-                    autoRepliesOnly[profileId] = filtered;
-                }
-            }
-            
-            console.log('[Sync] 📤 Отправка авто-ответов на сервер для:', operatorEmail, ', профилей:', Object.keys(autoRepliesOnly).length);
-            
-            const response = await fetch(`${SERVER_URL}/api/sync-autoreplies`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    operator_email: operatorEmail,
-                    auto_replies: autoRepliesOnly
-                })
-            });
-            
-            if (response.ok) {
-                const result = await response.json();
-                console.log('[Sync] ✅ Авто-ответы синхронизированы:', result);
-                return true;
-            } else {
-                const error = await response.text();
-                console.error('[Sync] ❌ Ошибка синхронизации:', response.status, error);
-                return false;
-            }
-        } catch (error) {
-            console.error('[Sync] ❌ Ошибка отправки авто-ответов:', error);
-            return false;
-        } finally {
-            isSyncing = false;
-        }
-    }
-    
-    /**
-     * Загружает авто-ответы с сервера и ПОЛНОСТЬЮ ЗАМЕНЯЕТ локальные
-     * Привязка по email оператора
-     */
-    async function loadAutoRepliesFromServer() {
-        try {
-            const operatorEmail = await getOperatorEmail();
-            if (!operatorEmail) {
-                console.log('[Sync] Email оператора не найден, загрузка с сервера пропущена');
-                return false;
-            }
-
-            // Проверяем кеш авто-ответов
-            const cacheKey = `autoreplies_${operatorEmail}`;
-            const cachedData = await getPopupCache(cacheKey);
-
-            if (cachedData) {
-                console.log('[Sync] 📋 Используем кешированные авто-ответы для:', operatorEmail);
-
-                // Применяем кешированные данные
-                const localData = await chrome.storage.local.get(['profileBroadcastMessages']);
-                const localMessages = localData.profileBroadcastMessages || {};
-
-                // Список авто-ответ полей
-                const autoReplyFields = [
-                    'winkReply', 'winkPhotoUrl', 'winkPhotoFilename', 'winkPhotoContentId',
-                    'likeReply', 'likePhotoUrl', 'likePhotoFilename', 'likePhotoContentId',
-                    'viewReply', 'viewPhotoUrl', 'viewPhotoFilename', 'viewPhotoContentId'
-                ];
-
-                // Применяем кешированные авто-ответы
-                for (const [profileId, replies] of Object.entries(cachedData.auto_replies)) {
-                    if (!localMessages[profileId]) {
-                        localMessages[profileId] = {};
-                    }
-
-                    for (const field of autoReplyFields) {
-                        if (replies[field]) {
-                            localMessages[profileId][field] = replies[field];
-                        }
-                    }
-                }
-
-                // Сохраняем обновленные данные
-                await chrome.storage.local.set({ profileBroadcastMessages: localMessages });
-                console.log('[Sync] ✅ Кешированные авто-ответы применены, профилей:', Object.keys(cachedData.auto_replies).length);
-
-                return true;
-            }
-
-            console.log('[Sync] 📥 Загрузка авто-ответов с сервера для:', operatorEmail);
-
-            const response = await fetch(`${SERVER_URL}/api/sync-autoreplies`, {
-                method: 'GET',
-                headers: {
-                    'X-Operator-Email': operatorEmail
-                }
-            });
-
-            if (response.ok) {
-                const result = await response.json();
-
-                // Кешируем результат
-                await setPopupCache(cacheKey, result);
-
-                if (result.found && result.auto_replies && Object.keys(result.auto_replies).length > 0) {
-                    console.log('[Sync] ✅ Авто-ответы загружены с сервера, профилей:', result.profiles_count);
-
-                    // Получаем локальные данные
-                    const localData = await chrome.storage.local.get(['profileBroadcastMessages']);
-                    const localMessages = localData.profileBroadcastMessages || {};
-
-                    // Список авто-ответ полей
-                    const autoReplyFields = [
-                        'winkReply', 'winkPhotoUrl', 'winkPhotoFilename', 'winkPhotoContentId',
-                        'likeReply', 'likePhotoUrl', 'likePhotoFilename', 'likePhotoContentId',
-                        'viewReply', 'viewPhotoUrl', 'viewPhotoFilename', 'viewPhotoContentId'
-                    ];
-
-                    // Удаляем авто-ответы из всех локальных профилей
-                    for (const profileId of Object.keys(localMessages)) {
-                        for (const field of autoReplyFields) {
-                            delete localMessages[profileId][field];
-                        }
-                        // Если профиль пустой - удаляем его
-                        if (Object.keys(localMessages[profileId]).length === 0) {
-                            delete localMessages[profileId];
-                        }
-                    }
-                    
-                    // Теперь добавляем серверные авто-ответы
-                    for (const [profileId, serverConfig] of Object.entries(result.auto_replies)) {
-                        if (!localMessages[profileId]) {
-                            localMessages[profileId] = {};
-                        }
-                        Object.assign(localMessages[profileId], serverConfig);
-                    }
-                    
-                    // Пропускаем следующую синхронизацию на сервер (чтобы не создавать цикл)
-                    skipNextStorageSync = true;
-                    
-                    // Сохраняем данные локально
-                    await chrome.storage.local.set({ profileBroadcastMessages: localMessages });
-                    
-                    // Обновляем локальную переменную
-                    profileBroadcastMessages = localMessages;
-                    
-                    console.log('[Sync] ✅ Авто-ответы полностью заменены серверными');
-                    return true;
-                } else {
-                    console.log('[Sync] На сервере нет сохраненных авто-ответов');
-                    return false;
-                }
-            } else {
-                const error = await response.text();
-                console.warn('[Sync] Ошибка загрузки с сервера:', response.status, error);
-                return false;
-            }
-        } catch (error) {
-            console.warn('[Sync] Ошибка загрузки авто-ответов:', error);
-            return false;
-        }
-    }
-    
-    /**
-     * Сохраняет авто-ответы локально И синхронизирует на сервер
-     */
-    async function saveAndSyncAutoReplies() {
-        await chrome.storage.local.set({ profileBroadcastMessages });
-        // Сразу синхронизируем на сервер (через content script для надежности)
-        syncAutoRepliesToServer();
-        triggerSyncViaContentScript('upload');
-    }
-    
-    // Слушаем изменения в storage и автоматически синхронизируем
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-        if (areaName === 'local' && changes.profileBroadcastMessages) {
-            // Пропускаем если это было обновление с сервера
-            if (skipNextStorageSync) {
-                skipNextStorageSync = false;
-                console.log('[Sync] Пропускаем синхронизацию (данные пришли с сервера)');
-                return;
-            }
-            console.log('[Sync] Обнаружено изменение авто-ответов, синхронизируем на сервер...');
-            // Синхронизируем и из popup и через content script
-            syncAutoRepliesToServer();
-            triggerSyncViaContentScript('upload');
-        }
-    });
-    
-    // Загружаем авто-ответы с сервера при старте popup
-    // Сначала пробуем через content script, потом напрямую
-    (async () => {
-        console.log('[Sync] 🔄 Запуск синхронизации авто-ответов при старте popup...');
-        
-        // Пробуем через content script (более надежно)
-        const syncedViaContentScript = await triggerSyncViaContentScript('download');
-        if (syncedViaContentScript) {
-            console.log('[Sync] ✅ Авто-ответы загружены через content script');
-            // Обновляем локальную переменную
-            const data = await chrome.storage.local.get(['profileBroadcastMessages']);
-            profileBroadcastMessages = data.profileBroadcastMessages || {};
-            return;
-        }
-        
-        // Если не удалось через content script - пробуем напрямую
-        const loaded = await loadAutoRepliesFromServer();
-        if (loaded) {
-            console.log('[Sync] ✅ Авто-ответы загружены напрямую с сервера');
-        } else {
-            console.log('[Sync] ℹ️ Авто-ответы не загружены (возможно, нет данных на сервере)');
-        }
-    })();
-    // ===== КОНЕЦ БЛОКА СИНХРОНИЗАЦИИ =====
 
     function applyBroadcastState(state) {
         if (!progressBar || !progressLabel) {
@@ -1367,7 +655,136 @@ document.addEventListener('DOMContentLoaded', async function() {
         chrome.storage.local.set({ profileBroadcastMessages });
     });
 
+    async function startGlobalBroadcast(kind) {
+            try {
+                if (isBroadcastingAll) {
+                    return;
+                }
 
+                const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                if (!tab || !tab.url || !tab.url.includes('alpha.date')) {
+                    status.textContent = 'Откройте вкладку alpha.date для рассылки';
+                    return;
+                }
+
+                const buttons = Array.from(profilesContainer.querySelectorAll('.broadcast-btn'));
+                if (buttons.length === 0) {
+                    status.textContent = 'Анкеты не найдены для рассылки';
+                    return;
+                }
+
+                const queue = [];
+                buttons.forEach((btn) => {
+                    const externalId = btn.getAttribute('data-external-id');
+                    const profileName = btn.getAttribute('data-name') || externalId || 'профиль';
+                    const profileCfg = profileBroadcastMessages[externalId] || {};
+
+                    let text = '';
+                    if (kind === 'chat') {
+                        const textareaChat = profilesContainer.querySelector(
+                            `.profile-message-input-chat[data-external-id="${externalId}"]`
+                        );
+                        text = textareaChat ? textareaChat.value.trim() : '';
+                        if (!text) {
+                            text = profileCfg.chat || profileDefaultChatTexts[externalId] || '';
+                        }
+                    } else {
+                        const textareaLetter = profilesContainer.querySelector(
+                            `.profile-message-input-letter[data-external-id="${externalId}"]`
+                        );
+                        text = textareaLetter ? textareaLetter.value.trim() : '';
+                        if (!text) {
+                            text = profileCfg.letter || profileDefaultLetterTexts[externalId] || '';
+                        }
+                    }
+
+                    if (!text) {
+                        return; // пропускаем анкету без текста
+                    }
+
+                    if (kind === 'letter' && text.length < 300) {
+                        return; // пропускаем письма меньше 300 символов
+                    }
+
+                    queue.push({ externalId, profileName, message: text, kind });
+                });
+
+                if (queue.length === 0) {
+                    status.textContent = 'Нет анкет с текстом для рассылки';
+                    return;
+                }
+
+                isBroadcastingAll = true;
+
+                const startMsg = `Запуск глобальной рассылки по ${queue.length} анкетам...`;
+                status.textContent = startMsg;
+                if (broadcastStatus) {
+                    broadcastStatus.textContent = startMsg;
+                }
+                if (progressBar) {
+                    progressBar.style.width = '0%';
+                }
+                if (progressLabel) {
+                    progressLabel.textContent = `Рассылка: 0/${queue.length}`;
+                }
+
+                chrome.tabs.sendMessage(
+                    tab.id,
+                    {
+                        type: 'startBroadcastAll',
+                        payload: { queue },
+                    },
+                    (response) => {
+                        if (chrome.runtime.lastError) {
+                            console.error('Ошибка при запуске глобальной рассылки:', chrome.runtime.lastError);
+                            status.textContent = 'Ошибка запуска глобальной рассылки';
+                            if (broadcastStatus) {
+                                broadcastStatus.textContent = 'Ошибка запуска глобальной рассылки';
+                            }
+                            if (progressLabel) {
+                                progressLabel.textContent = 'Ошибка запуска глобальной рассылки';
+                            }
+                            isBroadcastingAll = false;
+                            return;
+                        }
+
+                        if (!response || !response.ok) {
+                            const msg = `Ошибка запуска глобальной рассылки: ${(response && response.error) || ''}`;
+                            status.textContent = msg;
+                            if (broadcastStatus) {
+                                broadcastStatus.textContent = msg;
+                            }
+                            if (progressLabel) {
+                                progressLabel.textContent = msg;
+                            }
+                            isBroadcastingAll = false;
+                        }
+                    }
+                );
+            } catch (error) {
+                console.error('Ошибка глобальной рассылки:', error);
+                status.textContent = 'Ошибка глобальной рассылки';
+                if (broadcastStatus) {
+                    broadcastStatus.textContent = 'Ошибка глобальной рассылки';
+                }
+                if (progressLabel) {
+                    progressLabel.textContent = 'Ошибка глобальной рассылки';
+                }
+                isBroadcastingAll = false;
+            }
+        }
+
+    if (broadcastAllBtn) {
+        broadcastAllBtn.addEventListener('click', async function() {
+            await startGlobalBroadcast('chat');
+        });
+    }
+
+    if (broadcastLettersAllBtn) {
+        broadcastLettersAllBtn.addEventListener('click', async function() {
+            await startGlobalBroadcast('letter');
+        });
+    }
 
     async function startBroadcastForProfile(externalId, profileName, text, kind = 'chat', existingTabId) {
         try {
@@ -2899,9 +2316,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                 if (statSuccessfulChatMessages) statSuccessfulChatMessages.textContent = '0';
                 if (statReadMails) statReadMails.textContent = '0';
                 if (statLimitsUpdates) statLimitsUpdates.textContent = '0';
-
-                // Очищаем массив успешно добавленных профилей
-                successfulProfiles = [];
                 if (statsUpdatedInfo) {
                     statsUpdatedInfo.textContent = 'Статистика сброшена';
                     setTimeout(() => {
@@ -2911,36 +2325,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             } catch (e) {
                 console.error('Не удалось сбросить статистику:', e);
             }
-        });
-    }
-
-    // Обработчик для кнопки деталей успешно добавленных профилей
-    if (maybeSuccessDetailsBtn) {
-        maybeSuccessDetailsBtn.addEventListener('click', function() {
-            showSuccessProfilesModal();
-        });
-    }
-
-    // Обработчик закрытия модального окна
-    if (closeSuccessProfilesModal) {
-        closeSuccessProfilesModal.addEventListener('click', function() {
-            hideSuccessProfilesModal();
-        });
-    }
-
-    // Закрытие модального окна при клике вне его
-    if (successProfilesModal) {
-        successProfilesModal.addEventListener('click', function(event) {
-            if (event.target === successProfilesModal) {
-                hideSuccessProfilesModal();
-            }
-        });
-    }
-
-    // Обработчик очистки списка успешно добавленных профилей
-    if (clearSuccessProfilesBtn) {
-        clearSuccessProfilesBtn.addEventListener('click', function() {
-            clearSuccessfulProfiles();
         });
     }
 
@@ -3283,7 +2667,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             const userNames = data.userNames || {};
             userNames[userId] = name.trim();
             await chrome.storage.local.set({ userNames: userNames });
-            log('Сохранено имя для пользователя:', userId, '=', name);
+            console.log('[Alpha Date Extension] Сохранено имя для пользователя:', userId, '=', name);
         } catch (error) {
             console.error('[Alpha Date Extension] Ошибка сохранения имени пользователя:', error);
         }
@@ -3955,47 +3339,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         addToMaybeBtn.addEventListener('click', startBulkMaybeAdd);
     }
 
-    // Обработчики для модального окна успешно добавленных профилей
-    if (maybeSuccessDetailsBtn) {
-        console.log('[Alpha Date Extension] Найдена кнопка деталей профилей');
-        maybeSuccessDetailsBtn.addEventListener('click', function() {
-            console.log('[Alpha Date Extension] Клик по кнопке деталей профилей');
-            showSuccessProfilesModal();
-        });
-    } else {
-        console.error('[Alpha Date Extension] Кнопка деталей профилей не найдена');
-    }
-
-    // Обработчик закрытия модального окна
-    if (closeSuccessProfilesModal) {
-        closeSuccessProfilesModal.addEventListener('click', function() {
-            hideSuccessProfilesModal();
-        });
-    }
-
-    // Закрытие модального окна при клике вне его
-    if (successProfilesModal) {
-        successProfilesModal.addEventListener('click', function(event) {
-            if (event.target === successProfilesModal) {
-                hideSuccessProfilesModal();
-            }
-        });
-    }
-
-    // Обработчик проверки нулевых действий
-    if (checkZeroActionsBtn) {
-        checkZeroActionsBtn.addEventListener('click', function() {
-            checkZeroActions();
-        });
-    }
-
-    // Обработчик очистки списка успешно добавленных профилей
-    if (clearSuccessProfilesBtn) {
-        clearSuccessProfilesBtn.addEventListener('click', function() {
-            clearSuccessfulProfiles();
-        });
-    }
-
     // ===== ОБРАБОТЧИКИ ДЛЯ ПОИСКА ПО ЧАТУ =====
 
     // Извлечение chat_uid из текущего URL
@@ -4112,30 +3455,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             chatSearchQuery.value = '';
             chatSearchOutput.innerHTML = 'История чата будет отображена здесь...';
             chatSearchOutput.style.color = '#ffffff';
-        });
-    }
-
-    // Обработчик кнопки выхода
-    if (logoutBtn) {
-        logoutBtn.addEventListener('click', async () => {
-            if (confirm('Вы уверены, что хотите завершить сессию?')) {
-                try {
-                    // Сбрасываем авторизацию через background.js
-                    await chrome.runtime.sendMessage({ type: 'resetAuth' });
-
-                    // Скрываем информацию о подписке
-                    const subscriptionInfo = document.getElementById('subscriptionInfo');
-                    if (subscriptionInfo) {
-                        subscriptionInfo.style.display = 'none';
-                    }
-
-                    window.location.href = 'auth.html';
-                } catch (error) {
-                    console.error('Ошибка сброса авторизации:', error);
-                    // Fallback - принудительно переходим на страницу авторизации
-                    window.location.href = 'auth.html';
-                }
-            }
         });
     }
 });
@@ -4255,68 +3574,34 @@ async function findChatByUserId(maleUserId) {
         const token = tokenResponse.token;
         const apiBase = tokenResponse.apiBase || 'https://alpha.date';
 
-        // Отправляем параллельные запросы на поиск чата с разными CHAT_TYPE
+        // Отправляем запрос на поиск чата
         const searchUrl = `${apiBase}/api/chatList/chatListByUserID`;
 
-        // Создаем два запроса: DEFAULT и CHANCE
-        const createSearchRequest = (chatType) => {
-            return fetch(searchUrl, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                },
-                credentials: 'include',
-                body: JSON.stringify({
-                    "user_id": "",
-                    "chat_uid": false,
-                    "page": 1,
-                    "freeze": false,
-                    "limits": null,
-                    "ONLINE_STATUS": 0,
-                    "CHAT_TYPE": chatType,
-                    "SEARCH": maleUserId.toString()
-                })
-            });
-        };
+        const response = await fetch(searchUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            },
+            credentials: 'include',
+            body: JSON.stringify({
+                "user_id": "",
+                "chat_uid": false,
+                "page": 1,
+                "freeze": false,
+                "limits": null,
+                "ONLINE_STATUS": 0,
+                "CHAT_TYPE": "DEFAULT",
+                "SEARCH": maleUserId.toString()
+            })
+        });
 
-        // Выполняем параллельные запросы
-        const [defaultResponse, chanceResponse] = await Promise.all([
-            createSearchRequest("DEFAULT"),
-            createSearchRequest("CHANCE")
-        ]);
-
-        // Проверяем ответы
-        let data = null;
-        let usedChatType = "";
-
-        // Сначала проверяем DEFAULT
-        if (defaultResponse.ok) {
-            data = await defaultResponse.json();
-            usedChatType = "DEFAULT";
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        // Если DEFAULT не дал результатов, пробуем CHANCE
-        if (!data || !data.response || !Array.isArray(data.response) || data.response.length === 0) {
-            if (chanceResponse.ok) {
-                data = await chanceResponse.json();
-                usedChatType = "CHANCE";
-            }
-        }
-
-        // Если оба запроса не удались
-        if (!data) {
-            if (!defaultResponse.ok) {
-                throw new Error(`DEFAULT запрос: HTTP ${defaultResponse.status}`);
-            }
-            if (!chanceResponse.ok) {
-                throw new Error(`CHANCE запрос: HTTP ${chanceResponse.status}`);
-            }
-            throw new Error('Не удалось выполнить поиск чатов');
-        }
-
-        console.log(`[Alpha Date Extension] Использован CHAT_TYPE: ${usedChatType} для поиска ${maleUserId}`);
+        const data = await response.json();
 
         // Ищем chat_uid в ответе
         let chatUid = null;
@@ -4448,13 +3733,6 @@ function updateMaybeStats(total, success, notFound, errors) {
     if (maybeSuccessCount) maybeSuccessCount.textContent = success;
     if (maybeNotFoundCount) maybeNotFoundCount.textContent = notFound;
     if (maybeErrorCount) maybeErrorCount.textContent = errors;
-
-    // Обновляем состояние кнопки деталей (активна только если есть успешно добавленные профили)
-    if (maybeSuccessDetailsBtn) {
-        maybeSuccessDetailsBtn.style.opacity = success > 0 ? '1' : '0.3';
-        maybeSuccessDetailsBtn.style.cursor = success > 0 ? 'pointer' : 'not-allowed';
-        maybeSuccessDetailsBtn.disabled = success === 0;
-    }
 }
 
 // Функция для обновления статуса Maybe
@@ -4462,217 +3740,6 @@ function updateMaybeStatus(message, color = '#a0a0a0') {
     if (maybeStatus) {
         maybeStatus.textContent = message;
         maybeStatus.style.color = color;
-    }
-}
-
-// Функции для работы с модальным окном успешно добавленных профилей
-function showSuccessProfilesModal() {
-    if (!successProfilesList || !successProfilesModal) return;
-
-    if (successfulProfiles.length === 0) {
-        successProfilesList.innerHTML = '<div style="text-align: center; color: #a0a0a0; padding: 40px;">📭 Нет успешно добавленных профилей</div>';
-    } else {
-        // Создаем два списка: ID в столбик и UID через запятую
-        const idsList = successfulProfiles.map(profile => profile.id).join('\n');
-        const uidsList = successfulProfiles.map(profile => profile.uid).join(', ');
-
-        const html = `
-            <div style="margin-bottom: 24px;">
-                <h4 style="color: #ffffff; margin: 0 0 12px 0; font-size: 16px;">👤 Список ID мужчин (${successfulProfiles.length}):</h4>
-                <textarea readonly style="width: 100%; min-height: 120px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 12px; color: #ffffff; font-family: monospace; font-size: 14px; resize: vertical;" onclick="this.select()">${idsList}</textarea>
-            </div>
-
-            <div>
-                <h4 style="color: #ffffff; margin: 0 0 12px 0; font-size: 16px;">🔗 Список UID через запятую:</h4>
-                <textarea readonly style="width: 100%; min-height: 60px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 12px; color: #ffffff; font-family: monospace; font-size: 14px; resize: vertical;" onclick="this.select()">${uidsList}</textarea>
-            </div>
-
-            <div style="margin-top: 16px; font-size: 12px; color: #a0a0a0; text-align: center;">
-                💡 Кликните на поле для выделения всего текста
-            </div>
-        `;
-
-        successProfilesList.innerHTML = html;
-    }
-
-    successProfilesModal.style.display = 'flex';
-}
-
-function hideSuccessProfilesModal() {
-    if (successProfilesModal) {
-        successProfilesModal.style.display = 'none';
-    }
-}
-
-function clearSuccessfulProfiles() {
-    successfulProfiles = [];
-    updateMaybeStats(0, 0, 0, 0);
-    hideSuccessProfilesModal();
-    logMaybeMessage('Список успешно добавленных профилей очищен', 'info');
-}
-
-// Функция проверки нулевых действий
-async function checkZeroActions() {
-    if (successfulProfiles.length === 0) {
-        alert('Нет успешно добавленных профилей для проверки');
-        return;
-    }
-
-    // Изменяем кнопку на состояние загрузки
-    checkZeroActionsBtn.disabled = true;
-    checkZeroActionsBtn.textContent = '⏳ Проверка...';
-
-    // Добавляем прогресс-бар в модальное окно
-    const progressHtml = `
-        <div id="zeroActionsProgress" style="margin-top: 16px; padding: 16px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <span style="color: #ffffff; font-size: 14px;">🔍 Проверка нулевых действий</span>
-                <span id="progressText" style="color: #a0a0a0; font-size: 12px;">0/${successfulProfiles.length}</span>
-            </div>
-            <div style="width: 100%; height: 8px; background: rgba(255, 255, 255, 0.1); border-radius: 4px; overflow: hidden;">
-                <div id="progressBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #ff8c00, #ffa500); border-radius: 4px; transition: width 0.3s ease;"></div>
-            </div>
-        </div>
-    `;
-
-    // Добавляем прогресс-бар в начало списка
-    successProfilesList.insertAdjacentHTML('afterbegin', progressHtml);
-
-    try {
-        // Получаем токен
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tabs || !tabs[0]) {
-            throw new Error('Не удалось получить активную вкладку');
-        }
-
-        if (!tabs[0].url || !tabs[0].url.includes('alpha.date')) {
-            throw new Error('Расширение работает только на страницах alpha.date');
-        }
-
-        let tokenResponse;
-        try {
-            tokenResponse = await chrome.tabs.sendMessage(tabs[0].id, { type: 'getToken' });
-        } catch (connectionError) {
-            tokenResponse = await getTokenDirectly(tabs[0].id);
-        }
-
-        if (!tokenResponse || !tokenResponse.token) {
-            throw new Error('Не удалось получить токен авторизации');
-        }
-
-        const token = tokenResponse.token;
-        const apiBase = tokenResponse.apiBase || 'https://alpha.date';
-
-        const zeroActionChats = [];
-        let checkedCount = 0;
-
-        // Проверяем каждый успешно добавленный профиль
-        for (const profile of successfulProfiles) {
-            try {
-                const searchUrl = `${apiBase}/api/chatList/chatListByUserID`;
-
-                const response = await fetch(searchUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json',
-                    },
-                    credentials: 'include',
-                    body: JSON.stringify({
-                        "user_id": "",
-                        "chat_uid": false,
-                        "page": 1,
-                        "freeze": false,
-                        "limits": null,
-                        "ONLINE_STATUS": 0,
-                        "CHAT_TYPE": "CHANCE",
-                        "SEARCH": profile.id.toString()
-                    })
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-
-                    // Ищем чаты с total_limit = 0
-                    if (data && data.response && Array.isArray(data.response)) {
-                        for (const chat of data.response) {
-                            if (chat.total_limit === 0 && chat.chat_uid) {
-                                zeroActionChats.push(chat.chat_uid);
-                                console.log(`[Zero Actions] Найден чат с нулевыми действиями: ${chat.chat_uid} (ID: ${profile.id})`);
-                            }
-                        }
-                    }
-                }
-
-                checkedCount++;
-                // Обновляем прогресс-бар
-                const progressPercent = (checkedCount / successfulProfiles.length) * 100;
-                const progressBar = document.getElementById('progressBar');
-                const progressText = document.getElementById('progressText');
-
-                if (progressBar) {
-                    progressBar.style.width = `${progressPercent}%`;
-                }
-                if (progressText) {
-                    progressText.textContent = `${checkedCount}/${successfulProfiles.length}`;
-                }
-
-                // Обновляем текст кнопки каждые 5 проверок
-                if (checkedCount % 5 === 0) {
-                    checkZeroActionsBtn.textContent = `⏳ Проверено ${checkedCount}/${successfulProfiles.length}...`;
-                }
-
-                // Небольшая пауза между запросами
-                await new Promise(resolve => setTimeout(resolve, 300));
-
-            } catch (error) {
-                console.error(`[Zero Actions] Ошибка проверки профиля ${profile.id}:`, error);
-            }
-        }
-
-        // Показываем результаты
-        if (zeroActionChats.length > 0) {
-            const chatUidsString = zeroActionChats.join(', ');
-
-            // Добавляем результат в модальное окно
-            const resultHtml = `
-                <div style="margin-top: 24px; padding: 16px; background: rgba(255, 165, 0, 0.1); border: 1px solid rgba(255, 165, 0, 0.3); border-radius: 8px;">
-                    <h4 style="color: #ff8c00; margin: 0 0 12px 0; font-size: 16px;">⚠️ Чаты с нулевыми действиями (${zeroActionChats.length}):</h4>
-                    <textarea readonly style="width: 100%; min-height: 80px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 12px; color: #ffffff; font-family: monospace; font-size: 14px; resize: vertical;" onclick="this.select()">${chatUidsString}</textarea>
-                    <div style="margin-top: 8px; font-size: 12px; color: #a0a0a0;">💡 Кликните для выделения всего текста</div>
-                </div>
-            `;
-
-            successProfilesList.insertAdjacentHTML('beforeend', resultHtml);
-            logMaybeMessage(`Найдено ${zeroActionChats.length} чатов с нулевыми действиями`, 'warning');
-        } else {
-            // Добавляем сообщение об отсутствии чатов с нулевыми действиями
-            const noResultsHtml = `
-                <div style="margin-top: 24px; padding: 16px; background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3); border-radius: 8px;">
-                    <div style="color: #00ff88; text-align: center;">
-                        ✅ Все чаты имеют доступные действия
-                    </div>
-                </div>
-            `;
-
-            successProfilesList.insertAdjacentHTML('beforeend', noResultsHtml);
-            logMaybeMessage('Все проверенные чаты имеют доступные действия', 'success');
-        }
-
-    } catch (error) {
-        console.error('[Zero Actions] Ошибка проверки нулевых действий:', error);
-        alert(`Ошибка проверки нулевых действий: ${error.message}`);
-    } finally {
-        // Удаляем прогресс-бар
-        const progressElement = document.getElementById('zeroActionsProgress');
-        if (progressElement) {
-            progressElement.remove();
-        }
-
-        // Восстанавливаем кнопку
-        checkZeroActionsBtn.disabled = false;
-        checkZeroActionsBtn.textContent = '🔍 Проверить нулевые действия';
     }
 }
 
@@ -4735,15 +3802,6 @@ async function startBulkMaybeAdd() {
 
             logMaybeMessage(`🎉 Успешно добавлено в Maybe: ID ${maleUserId}`, 'success');
             successCount++;
-
-            // Сохраняем информацию об успешно добавленном профиле
-            successfulProfiles.push({
-                uid: chatUid,
-                id: maleUserId,
-                timestamp: new Date().toISOString(),
-                index: successCount
-            });
-
             updateMaybeStats(userIds.length, successCount, notFoundCount, errorCount);
 
             // Небольшая пауза между запросами, чтобы не перегружать сервер
@@ -4914,451 +3972,5 @@ function performChatSearch(query) {
 
         chatSearchOutput.innerHTML = output;
     }
-}
-
-// ===== ФУНКЦИИ ДЛЯ ВКЛАДКИ ЛОРД =====
-
-// Глобальные функции для onclick
-window.removeTrackedKey = removeTrackedKey;
-
-// Инициализация вкладки лорда
-async function initializeLordTab() {
-    console.log('[Lord Tab] Инициализация вкладки лорда');
-
-    // Получаем элементы
-    const refreshBtn = document.getElementById('refreshTrackedKeysBtn');
-    const addKeyBtn = document.getElementById('addTrackedKeyBtn');
-
-    if (refreshBtn) {
-        refreshBtn.addEventListener('click', loadTrackedKeys);
-    }
-
-    if (addKeyBtn) {
-        addKeyBtn.addEventListener('click', addTrackedKey);
-    }
-
-    // Автоматически загружаем ключи при открытии вкладки
-    await loadTrackedKeys();
-}
-
-// Загрузка отслеживаемых ключей
-async function loadTrackedKeys() {
-    try {
-
-        // Получаем user_id через расширение
-        const authStatus = await chrome.runtime.sendMessage({ type: 'getAuthStatus' });
-        const userId = authStatus.user_id;
-        if (!userId) {
-            updateTrackedKeysUI({
-                error: 'Требуется авторизация'
-            });
-            return;
-        }
-
-        const response = await fetch(`${SERVER_URL}/api/lord/tracked-keys`, {
-            method: 'GET',
-            headers: {
-                'X-User-ID': userId.toString(),
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            updateTrackedKeysUI({
-                keys: data.tracked_keys || []
-            });
-        } else if (response.status === 403) {
-            updateTrackedKeysUI({
-                error: 'Недостаточно прав доступа'
-            });
-        } else {
-            updateTrackedKeysUI({
-                error: 'Ошибка загрузки ключей'
-            });
-        }
-
-    } catch (error) {
-        console.error('[Lord Tab] Ошибка загрузки ключей:', error);
-        updateTrackedKeysUI({
-            error: 'Ошибка сети'
-        });
-    }
-}
-
-// Добавление ключа для отслеживания
-async function addTrackedKey() {
-    const keyValue = document.getElementById('trackedKeyValue').value.trim();
-    const userName = document.getElementById('trackedUserName').value.trim();
-
-    if (!keyValue) {
-        alert('Введите key_value');
-        return;
-    }
-
-    try {
-        // Получаем user_id через расширение
-        const authStatus = await chrome.runtime.sendMessage({ type: 'getAuthStatus' });
-        const userId = authStatus.user_id;
-        if (!userId) {
-            alert('Требуется авторизация');
-            return;
-        }
-
-        const response = await fetch(`${SERVER_URL}/api/lord/add-tracked-key`, {
-            method: 'POST',
-            headers: {
-                'X-User-ID': userId.toString(),
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                key_value: keyValue,
-                user_name: userName || null
-            })
-        });
-
-        if (response.ok) {
-            const result = await response.json();
-            alert(result.message);
-
-            // Очищаем форму
-            document.getElementById('trackedKeyValue').value = '';
-            document.getElementById('trackedUserName').value = '';
-
-            // Перезагружаем список
-            await loadTrackedKeys();
-        } else {
-            const error = await response.json();
-            alert(error.detail || 'Ошибка добавления ключа');
-        }
-
-    } catch (error) {
-        console.error('[Lord Tab] Ошибка добавления ключа:', error);
-        alert('Ошибка сети');
-    }
-}
-
-// Удаление ключа из отслеживаемых
-async function removeTrackedKey(keyValue) {
-    if (!confirm(`Удалить ключ ${keyValue} из отслеживаемых?`)) {
-        return;
-    }
-
-    try {
-        // Получаем user_id через расширение
-        const authStatus = await chrome.runtime.sendMessage({ type: 'getAuthStatus' });
-        const userId = authStatus.user_id;
-        if (!userId) {
-            alert('Требуется авторизация');
-            return;
-        }
-
-        const response = await fetch(`${SERVER_URL}/api/lord/remove-tracked-key?key_value=${encodeURIComponent(keyValue)}`, {
-            method: 'DELETE',
-            headers: {
-                'X-User-ID': userId.toString(),
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (response.ok) {
-            const result = await response.json();
-            alert(result.message);
-            await loadTrackedKeys();
-        } else {
-            const error = await response.json();
-            alert(error.detail || 'Ошибка удаления ключа');
-        }
-
-    } catch (error) {
-        console.error('[Lord Tab] Ошибка удаления ключа:', error);
-        alert('Ошибка сети');
-    }
-}
-
-// Функция для начала inline-редактирования
-function startInlineEdit(button, keyId, field, currentValue) {
-    const container = button.parentElement;
-    const textSpan = container.querySelector('span');
-    const originalText = textSpan.textContent;
-
-    // Создаем input для редактирования
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = currentValue;
-    input.style.cssText = `
-        background: rgba(0, 0, 0, 0.5);
-        border: 1px solid rgba(0, 122, 255, 0.5);
-        border-radius: 4px;
-        color: #ffffff;
-        padding: 4px 8px;
-        font-size: ${field === 'user_name' ? '13px' : '11px'};
-        width: 150px;
-    `;
-
-    // Заменяем span на input
-    textSpan.style.display = 'none';
-    container.insertBefore(input, button);
-
-    // Меняем кнопку на "Сохранить"
-    const originalButtonText = button.textContent;
-    button.textContent = '💾';
-    button.style.background = 'rgba(0, 255, 0, 0.2)';
-    button.style.borderColor = 'rgba(0, 255, 0, 0.5)';
-    button.style.color = '#00ff00';
-
-    // Обработчик сохранения
-    const saveHandler = async () => {
-        const newValue = input.value.trim();
-        await finishInlineEdit(keyId, field, newValue, container, textSpan, button, originalButtonText, input);
-    };
-
-    // Обработчик отмены (Escape)
-    const cancelHandler = (e) => {
-        if (e.key === 'Escape') {
-            textSpan.style.display = '';
-            container.removeChild(input);
-            button.textContent = originalButtonText;
-            button.style.background = 'rgba(0, 122, 255, 0.2)';
-            button.style.borderColor = 'rgba(0, 122, 255, 0.5)';
-            button.style.color = '#007AFF';
-            input.removeEventListener('keydown', cancelHandler);
-            button.removeEventListener('click', saveHandler);
-        }
-    };
-
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            saveHandler();
-        } else if (e.key === 'Escape') {
-            cancelHandler(e);
-        }
-    });
-
-    button.addEventListener('click', saveHandler);
-    input.focus();
-    input.select();
-}
-
-// Функция для завершения inline-редактирования
-async function finishInlineEdit(keyId, field, newValue, container, textSpan, button, originalButtonText, input) {
-    try {
-        // Получаем key_value для данного keyId
-        const keys = JSON.parse(localStorage.getItem('lordTrackedKeys') || '[]');
-        const keyData = keys.find(k => k.id == keyId);
-
-        if (!keyData) {
-            alert('Ключ не найден');
-            return;
-        }
-
-        // Отправляем обновление на сервер
-        const authStatus = await chrome.runtime.sendMessage({ type: 'getAuthStatus' });
-        const userId = authStatus.user_id;
-
-        if (!userId) {
-            alert('Требуется авторизация');
-            return;
-        }
-
-        const response = await fetch(`${SERVER_URL}/api/lord/update-tracked-key`, {
-            method: 'PUT',
-            headers: {
-                'X-User-ID': userId.toString(),
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                key_value: keyData.key_value,
-                [field]: newValue
-            })
-        });
-
-        if (response.ok) {
-            // Обновляем отображение
-            const icon = '👤';
-            textSpan.textContent = `${icon} ${newValue || 'Не указано'}`;
-
-            // Обновляем данные в localStorage
-            keyData[field] = newValue;
-            localStorage.setItem('lordTrackedKeys', JSON.stringify(keys));
-
-            alert('Изменения сохранены');
-        } else {
-            const error = await response.json();
-            alert(error.detail || 'Ошибка сохранения');
-        }
-
-    } catch (error) {
-        console.error('[Lord Tab] Ошибка сохранения:', error);
-        alert('Ошибка сети');
-    }
-
-    // Восстанавливаем интерфейс
-    textSpan.style.display = '';
-    container.removeChild(input);
-    button.textContent = originalButtonText;
-    button.style.background = 'rgba(0, 122, 255, 0.2)';
-    button.style.borderColor = 'rgba(0, 122, 255, 0.5)';
-    button.style.color = '#007AFF';
-}
-
-// Обновление UI отслеживаемых ключей
-function updateTrackedKeysUI(data) {
-    const listEl = document.getElementById('trackedKeysList');
-
-    if (data.error) {
-        listEl.innerHTML = `<div style="padding: 20px; text-align: center; color: #ff6b6b;">❌ ${data.error}</div>`;
-        return;
-    }
-
-    const keys = data.keys || [];
-
-    // Сохраняем ключи в localStorage для быстрого доступа
-    localStorage.setItem('lordTrackedKeys', JSON.stringify(keys));
-
-    if (keys.length === 0) {
-        listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: #a0a0a0;">📭 Нет отслеживаемых ключей<br><small>Добавьте ключ выше</small></div>';
-        return;
-    }
-
-    let html = '<div style="padding: 16px;"><div style="display: grid; gap: 8px;">';
-
-    keys.forEach(key => {
-        const expiresAt = key.expires_at ? new Date(key.expires_at) : null;
-        const expiresText = expiresAt ? expiresAt.toLocaleString('ru-RU') : 'Бессрочная';
-        const isExpired = key.is_expired;
-        const daysRemaining = key.days_remaining;
-
-        let statusColor = '#00ff88'; // Зеленый
-        let statusText = '✅ Активна';
-        let statusIcon = '🟢';
-
-        if (isExpired) {
-            statusColor = '#ff6b6b'; // Красный
-            statusText = '❌ Истекла';
-            statusIcon = '🔴';
-        } else if (daysRemaining !== null) {
-            if (daysRemaining <= 0) {
-                statusColor = '#ff6b6b';
-                statusText = '⏰ Истекает сегодня';
-                statusIcon = '🟡';
-            } else if (daysRemaining <= 3) {
-                statusColor = '#ffa500';
-                statusText = `⏰ ${daysRemaining} д.`;
-                statusIcon = '🟡';
-            } else if (daysRemaining <= 7) {
-                statusColor = '#ffd700';
-                statusText = `⏰ ${daysRemaining} д.`;
-                statusIcon = '🟡';
-            }
-        }
-
-        html += `
-            <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px;">
-                <div style="display: flex; justify-content: space-between; align-items: start; gap: 12px;">
-                    <div style="flex: 1;">
-                        <div style="font-size: 18px; color: #ffffff; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; font-weight: 700;">
-                            <span>👤 ${key.user_name || 'Не указано'}</span>
-                            <button class="edit-btn edit-name-btn" data-key-id="${key.id}" data-field="user_name" data-current-value="${key.user_name || ''}"
-                                    style="background: rgba(0, 122, 255, 0.2); border: 1px solid rgba(0, 122, 255, 0.5); color: #007AFF; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;">
-                                ✏️
-                            </button>
-                        </div>
-                        <div style="font-size: 15px; color: ${statusColor}; font-weight: 500; margin-bottom: 12px;">
-                            📅 ${expiresText} ${daysRemaining !== null && daysRemaining > 0 ? `(${daysRemaining} д. осталось)` : daysRemaining === 0 ? '(истекает сегодня)' : ''}
-                        </div>
-                        <div style="text-align: center; font-size: 11px; color: #a0a0a0; font-weight: 500; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.1);">
-                            🔑 ${key.key_value} ${statusIcon}
-                        </div>
-                    </div>
-                    <div style="display: flex; flex-direction: column; gap: 4px;">
-                        <button class="edit-btn refresh-single-key" data-key-id="${key.id}"
-                                style="background: rgba(0, 122, 255, 0.2); border: 1px solid rgba(0, 122, 255, 0.5); color: #007AFF; padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 10px;">
-                            🔄
-                        </button>
-                        <button class="remove-key-btn" data-key-value="${key.key_value}"
-                                style="background: rgba(255, 77, 79, 0.2); border: 1px solid rgba(255, 77, 79, 0.5); color: #ff4d4f; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;">
-                            🗑️
-                        </button>
-                    </div>
-                </div>
-            </div>
-        `;
-    });
-
-    html += '</div></div>';
-    listEl.innerHTML = html;
-
-    // Добавляем обработчики событий для кнопок удаления
-    const removeButtons = listEl.querySelectorAll('.remove-key-btn');
-    removeButtons.forEach(button => {
-        button.addEventListener('click', () => {
-            const keyValue = button.getAttribute('data-key-value');
-            if (keyValue) {
-                removeTrackedKey(keyValue);
-            }
-        });
-    });
-
-    // Добавляем обработчики событий для кнопок редактирования имени
-    const editNameButtons = listEl.querySelectorAll('.edit-name-btn');
-    editNameButtons.forEach(button => {
-        button.addEventListener('click', () => {
-            const keyId = button.getAttribute('data-key-id');
-            const field = button.getAttribute('data-field');
-            const currentValue = button.getAttribute('data-current-value');
-            if (keyId && field) {
-                startInlineEdit(button, keyId, field, currentValue);
-            }
-        });
-    });
-
-    // Добавляем обработчики для кнопок обновления
-    const refreshButtons = listEl.querySelectorAll('.refresh-single-key');
-    refreshButtons.forEach(button => {
-        button.addEventListener('click', async () => {
-            const keyId = button.getAttribute('data-key-id');
-            if (keyId) {
-                // Показываем загрузку
-                button.textContent = '⏳';
-                button.disabled = true;
-
-                try {
-                    // Получаем свежие данные для этого ключа
-                    const authStatus = await chrome.runtime.sendMessage({ type: 'getAuthStatus' });
-                    const userId = authStatus.user_id;
-
-                    if (!userId) {
-                        alert('Требуется авторизация');
-                        return;
-                    }
-
-                    const response = await fetch(`${SERVER_URL}/api/lord/tracked-keys`, {
-                        method: 'GET',
-                        headers: {
-                            'X-User-ID': userId.toString(),
-                            'Content-Type': 'application/json'
-                        }
-                    });
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        updateTrackedKeysUI({
-                            keys: data.tracked_keys || []
-                        });
-                    } else {
-                        alert('Ошибка обновления данных');
-                    }
-                } catch (error) {
-                    console.error('[Lord Tab] Ошибка обновления:', error);
-                    alert('Ошибка сети');
-                } finally {
-                    // Восстанавливаем кнопку
-                    button.textContent = '🔄';
-                    button.disabled = false;
-                }
-            }
-        });
-    });
 }
 
